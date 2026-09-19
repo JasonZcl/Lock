@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Windows;
 using System.Windows.Media;
+using Lock.Core.Ipc;
 using Lock.Core.Models;
 using Lock.Core.Services;
 using Lock.Services;
@@ -63,6 +64,7 @@ public partial class MainWindow : Window
         _client.Connected += OnConnectionChanged;
         _client.Disconnected += OnConnectionChanged;
         _client.SettingsChanged += () => _ = LoadSettingsAsync();
+        _client.FoldersChanged += () => _ = LoadFoldersAsync();
 
         Closing += OnClosing;
         Loaded += async (_, _) =>
@@ -79,7 +81,7 @@ public partial class MainWindow : Window
     private async Task LoadSettingsAsync()
     {
         var enabled = LoggedIn;
-        AppsTab.IsEnabled = SettingsTab.IsEnabled = LogTab.IsEnabled = enabled;
+        AppsTab.IsEnabled = SettingsTab.IsEnabled = LogTab.IsEnabled = FoldersTab.IsEnabled = enabled;
         if (!enabled)
         {
             Tabs.SelectedItem = ServiceTab;
@@ -105,6 +107,7 @@ public partial class MainWindow : Window
         foreach (var app in _settings.LockedApps) _rows.Add(new Row(app));
         GraceBox.Text = _settings.UnlockGraceSeconds.ToString();
         AttemptsBox.Text = _settings.MaxAttempts.ToString();
+        RelockBox.Text = _settings.FolderRelockMinutes.ToString();
         PauseCheck.IsChecked = _settings.Paused;
         _loading = false;
         SetDirty(false);
@@ -125,8 +128,15 @@ public partial class MainWindow : Window
             return false;
         }
 
+        if (!int.TryParse(RelockBox.Text, out var relock) || relock < 0)
+        {
+            ShowError("文件夹自动锁定分钟数必须是大于等于 0 的整数");
+            return false;
+        }
+
         _settings.UnlockGraceSeconds = grace;
         _settings.MaxAttempts = attempts;
+        _settings.FolderRelockMinutes = relock;
         _settings.Paused = PauseCheck.IsChecked == true;
         _settings.LockedApps = _rows.Select(r => r.Model).ToList();
 
@@ -250,6 +260,77 @@ public partial class MainWindow : Window
         SetDirty(true);
     }
 
+    // ---- 文件夹锁 ----
+
+    public sealed class FolderRow
+    {
+        public required FolderInfo Info { get; init; }
+        public string DisplayName => Info.DisplayName;
+        public string Path => Info.Path;
+        public string StateText => Info.Locked ? "已锁定" : "已解锁";
+        public Brush StateBg => (Brush)Application.Current.FindResource(Info.Locked ? "SuccessLight" : "WarningLight");
+        public Brush StateFg => (Brush)Application.Current.FindResource(Info.Locked ? "Success" : "Warning");
+        public string RelockText => Info.Locked ? "" : Info.RelockInSeconds is { } s ? $"{Math.Max(1, (s + 59) / 60)} 分钟后" : "注销 / 手动";
+    }
+
+    private async Task LoadFoldersAsync()
+    {
+        if (!LoggedIn) return;
+        var r = await _client.FolderListAsync();
+        if (!r.Ok || r.Data == null) return;
+        FolderList.ItemsSource = r.Data.Folders.Select(f => new FolderRow { Info = f }).ToList();
+    }
+
+    private void RefreshFolders_Click(object sender, RoutedEventArgs e) => _ = LoadFoldersAsync();
+
+    private async void AddFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFolderDialog { Title = "选择要锁定的文件夹", Multiselect = true };
+        if (dlg.ShowDialog(this) != true) return;
+
+        var errors = new List<string>();
+        foreach (var path in dlg.FolderNames)
+        {
+            var r = await _client.FolderAddAsync(path);
+            if (!r.Ok) errors.Add(path + "\n    " + r.Error);
+            Lock.Core.Native.NativeMethods.NotifyFolderChanged(path);
+        }
+        await LoadFoldersAsync();
+        if (errors.Count > 0) ShowError("以下文件夹未能锁定：\n\n" + string.Join("\n", errors));
+    }
+
+    private async void LockFolder_Click(object sender, RoutedEventArgs e)
+        => await ForSelectedFoldersAsync(p => _client.FolderLockAsync(p), "锁定");
+
+    private async void UnlockFolder_Click(object sender, RoutedEventArgs e)
+        => await ForSelectedFoldersAsync(p => _client.FolderUnlockAsync(p, null), "解锁");
+
+    private async void RemoveFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = FolderList.SelectedItems.OfType<FolderRow>().ToList();
+        if (selected.Count == 0) return;
+        var answer = MessageBox.Show(this, $"移除 {selected.Count} 个文件夹？移除后会恢复原有权限，不再受保护。",
+            "应用锁", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (answer != MessageBoxResult.Yes) return;
+        await ForSelectedFoldersAsync(p => _client.FolderRemoveAsync(p), "移除");
+    }
+
+    private async Task ForSelectedFoldersAsync(Func<string, Task<ApiResult<ServiceClient.Empty>>> op, string verb)
+    {
+        var selected = FolderList.SelectedItems.OfType<FolderRow>().Select(r => r.Path).ToList();
+        if (selected.Count == 0) return;
+
+        var errors = new List<string>();
+        foreach (var path in selected)
+        {
+            var r = await op(path);
+            if (!r.Ok) errors.Add(path + "\n    " + r.Error);
+            Lock.Core.Native.NativeMethods.NotifyFolderChanged(path);
+        }
+        await LoadFoldersAsync();
+        if (errors.Count > 0) ShowError($"以下文件夹{verb}失败：\n\n" + string.Join("\n", errors));
+    }
+
     // ---- 日志（倒序分页） ----
 
     private int _logPage;      // 从 0 开始
@@ -314,6 +395,7 @@ public partial class MainWindow : Window
 
         // 每次进入日志页都回到第一页，看到最新记录
         if (Tabs.SelectedItem == LogTab) _ = LoadLogPageAsync(0);
+        if (Tabs.SelectedItem == FoldersTab) _ = LoadFoldersAsync();
     }
 
     // ---- 密码 ----
@@ -390,9 +472,14 @@ public partial class MainWindow : Window
         InstallButton.IsEnabled = UninstallButton.IsEnabled = false;
         try
         {
-            // sc / schtasks 要跑好几秒，放后台线程避免界面卡死
-            await Task.Run(() => ServiceInstaller.Install(App.ServiceExePath, Environment.ProcessPath!));
+            // 托盘本身不是管理员：提权运行服务程序的 install 子命令（弹一次 UAC）
+            var agent = Environment.ProcessPath!;
+            await Task.Run(() => ServiceInstaller.RunElevated(App.ServiceExePath, "install \"" + agent + "\""));
             MessageBox.Show(this, "服务已安装并启动。", "应用锁", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            // 用户在 UAC 上点了“否”
         }
         catch (Exception ex)
         {
@@ -411,8 +498,12 @@ public partial class MainWindow : Window
         try
         {
             var keep = answer == MessageBoxResult.No;
-            await Task.Run(() => ServiceInstaller.Uninstall(keepData: keep));
+            await Task.Run(() => ServiceInstaller.RunElevated(App.ServiceExePath, keep ? "uninstall" : "uninstall --purge"));
             MessageBox.Show(this, "服务已卸载。", "应用锁", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            // 用户在 UAC 上点了“否”
         }
         catch (Exception ex)
         {

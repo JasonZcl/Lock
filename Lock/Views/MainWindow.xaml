@@ -23,7 +23,7 @@
                 </Border>
                 <StackPanel VerticalAlignment="Center">
                     <TextBlock Text="应用锁" Style="{StaticResource PageTitle}"/>
-                    <TextBlock Text="为指定程序设置启动密码" Style="{StaticResource Muted}" FontSize="12"/>
+                    <TextBlock Text="为程序和文件夹加上密码" Style="{StaticResource Muted}" FontSize="12"/>
                 </StackPanel>
             </StackPanel>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
@@ -127,6 +127,68 @@
                 </Grid>
             </TabItem>
 
+            <!-- ============ 文件夹 ============ -->
+            <TabItem x:Name="FoldersTab" Header="文件夹锁">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0" Margin="0,0,0,12">
+                        <StackPanel Orientation="Horizontal">
+                            <Button Content="添加文件夹…" Style="{StaticResource PrimaryButton}" Margin="0,0,8,0" Click="AddFolder_Click"/>
+                            <Button Content="锁定" Margin="0,0,8,0" Click="LockFolder_Click"/>
+                            <Button Content="解锁" Margin="0,0,8,0" Click="UnlockFolder_Click"/>
+                            <Button Content="移除所选（恢复权限）" Style="{StaticResource DangerButton}" Click="RemoveFolder_Click"/>
+                        </StackPanel>
+                        <Button Content="刷新" HorizontalAlignment="Right" Click="RefreshFolders_Click"/>
+                    </Grid>
+
+                    <ListView x:Name="FolderList" Grid.Row="1" SelectionMode="Extended">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="文件夹" Width="420">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Path Data="M2,5 h6 l2,2 h8 v10 h-16 z" Stroke="{StaticResource Warning}" StrokeThickness="1.6" Fill="{StaticResource WarningLight}"
+                                                      StrokeLineJoin="Round" Width="20" Height="20" Stretch="Uniform" Margin="4,0,10,0"/>
+                                                <StackPanel VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                                                    <TextBlock Text="{Binding Path}" Foreground="{StaticResource TextMuted}" FontSize="11" TextTrimming="CharacterEllipsis" ToolTip="{Binding Path}"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="状态" Width="120">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <Border Style="{StaticResource Pill}" HorizontalAlignment="Left" Padding="8,2"
+                                                    Background="{Binding StateBg}">
+                                                <TextBlock Text="{Binding StateText}" FontSize="12" Foreground="{Binding StateFg}"/>
+                                            </Border>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="自动重新锁定" Width="160">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding RelockText}" Foreground="{StaticResource TextMuted}"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
+
+                    <TextBlock Grid.Row="2" Margin="0,12,0,0" Style="{StaticResource Muted}"
+                               Text="锁定后文件夹对所有用户显示“拒绝访问”。也可以在资源管理器里右键文件夹 → “应用锁：锁定 / 解锁此文件夹”。注销或托盘程序退出时会自动全部锁定。"/>
+                </Grid>
+            </TabItem>
+
             <!-- ============ 日志 ============ -->
             <TabItem x:Name="LogTab" Header="解锁日志">
                 <Grid>
@@ -206,11 +268,12 @@
                                 <TextBlock Text="解锁行为" Style="{StaticResource SectionTitle}"/>
                                 <Grid Margin="0,8,0,0">
                                     <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="150"/>
+                                        <ColumnDefinition Width="170"/>
                                         <ColumnDefinition Width="90"/>
                                         <ColumnDefinition Width="*"/>
                                     </Grid.ColumnDefinitions>
                                     <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                     </Grid.RowDefinitions>
@@ -221,6 +284,10 @@
                                     <TextBlock Grid.Row="1" Grid.Column="0" Text="最多尝试次数" VerticalAlignment="Center" Margin="0,12,0,0"/>
                                     <TextBox x:Name="AttemptsBox" Grid.Row="1" Grid.Column="1" Margin="0,12,0,0" TextChanged="Dirty"/>
                                     <TextBlock Grid.Row="1" Grid.Column="2" Text="输错这么多次后结束目标程序" Style="{StaticResource Muted}"
+                                               VerticalAlignment="Center" Margin="12,12,0,0"/>
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="文件夹自动锁定（分钟）" VerticalAlignment="Center" Margin="0,12,0,0"/>
+                                    <TextBox x:Name="RelockBox" Grid.Row="2" Grid.Column="1" Margin="0,12,0,0" TextChanged="Dirty"/>
+                                    <TextBlock Grid.Row="2" Grid.Column="2" Text="解锁后多久自动锁回；0 表示直到注销/手动锁定" Style="{StaticResource Muted}"
                                                VerticalAlignment="Center" Margin="12,12,0,0"/>
                                 </Grid>
                                 <Button Content="保存设置" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left" Margin="0,16,0,0" Click="Save_Click"/>

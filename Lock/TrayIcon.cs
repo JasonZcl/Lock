@@ -1,11 +1,10 @@
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 
 namespace Lock;
 
 /// <summary>
-/// 托盘图标（基于 WinForms NotifyIcon），图标在运行时绘制，无需资源文件。
+/// 托盘图标（基于 WinForms NotifyIcon）。
 /// </summary>
 public sealed class TrayIcon : IDisposable
 {
@@ -17,7 +16,7 @@ public sealed class TrayIcon : IDisposable
 
     public TrayIcon()
     {
-        _drawnIcon = DrawLockIcon();
+        _drawnIcon = LoadAppIcon();
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开管理界面", null, (_, _) => OpenRequested?.Invoke());
@@ -47,39 +46,19 @@ public sealed class TrayIcon : IDisposable
         _icon.Text = text.Length > 127 ? text[..127] : text;
     }
 
-    private static Icon DrawLockIcon()
+    /// <summary>从 exe 自身嵌入的图标资源取托盘图标，与资源管理器/右键菜单里的图标一致。</summary>
+    private static Icon LoadAppIcon()
     {
-        using var bmp = new Bitmap(32, 32);
-        using (var g = Graphics.FromImage(bmp))
-        {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.Clear(Color.Transparent);
-
-            // 锁环
-            using var pen = new Pen(Color.FromArgb(60, 60, 60), 4);
-            g.DrawArc(pen, 9, 3, 14, 16, 180, 180);
-
-            // 锁体
-            using var body = new SolidBrush(Color.FromArgb(230, 160, 30));
-            g.FillRectangle(body, 5, 13, 22, 16);
-
-            // 锁孔
-            using var hole = new SolidBrush(Color.FromArgb(60, 60, 60));
-            g.FillEllipse(hole, 13, 17, 6, 6);
-            g.FillRectangle(hole, 15, 20, 2, 5);
-        }
-
-        var handle = bmp.GetHicon();
         try
         {
-            // FromHandle 的图标不拥有句柄，Clone 一份后释放原句柄
-            using var tmp = Icon.FromHandle(handle);
-            return (Icon)tmp.Clone();
+            var path = Environment.ProcessPath;
+            if (path != null && Icon.ExtractAssociatedIcon(path) is { } icon) return icon;
         }
-        finally
+        catch
         {
-            Lock.Core.Native.NativeMethods.DestroyIcon(handle);
+            // 走下面的兜底
         }
+        return SystemIcons.Shield;
     }
 
     public void Dispose()

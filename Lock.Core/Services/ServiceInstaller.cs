@@ -62,7 +62,10 @@ public static class ServiceInstaller
         Check(Run("sc.exe", $"start {ServiceName}"));
 
         if (File.Exists(agentPath))
+        {
             InstallAgentTask(agentPath);
+            InstallContextMenu(agentPath);
+        }
     }
 
     public static void Uninstall(bool keepData = true)
@@ -70,6 +73,7 @@ public static class ServiceInstaller
         if (!IsAdministrator()) throw new InvalidOperationException("需要管理员权限。");
 
         Run("schtasks.exe", $"/Delete /TN \"{TaskName}\" /F");
+        RemoveContextMenu();
 
         if (QueryState() != ServiceState.NotInstalled)
         {
@@ -80,13 +84,85 @@ public static class ServiceInstaller
             Check(Run("sc.exe", $"delete {ServiceName}"));
         }
 
+        // 服务已停，锁着的文件夹没人能解了——在这里把权限恢复回去，否则卸载后文件夹永久无法访问
+        RestoreAllFolders();
+
         if (!keepData && Directory.Exists(ConfigStore.DataDirectory))
             Directory.Delete(ConfigStore.DataDirectory, recursive: true);
     }
 
+    /// <summary>恢复配置中所有仍处于锁定状态的文件夹的权限。失败的记录下来抛给调用方。</summary>
+    public static void RestoreAllFolders()
+    {
+        var config = ConfigStore.Load();
+        var failures = new List<string>();
+        var changed = false;
+
+        foreach (var f in config.Folders)
+        {
+            if (!Directory.Exists(f.Path)) continue;
+            try
+            {
+                if (FolderLocker.IsLockedOnDisk(f.Path))
+                    FolderLocker.Unlock(f.Path, f.OriginalSddl);
+                f.Locked = false;
+                changed = true;
+            }
+            catch (Exception ex)
+            {
+                failures.Add($"{f.Path}：{ex.Message}");
+            }
+        }
+
+        if (changed)
+        {
+            try { ConfigStore.Save(config); } catch { /* 数据目录可能即将被删除 */ }
+        }
+        if (failures.Count > 0)
+            throw new InvalidOperationException("以下文件夹权限恢复失败，请手动在“属性 → 安全”里取得所有权：\n" + string.Join("\n", failures));
+    }
+
+    // ---- 资源管理器右键菜单 ----
+
+    private const string ContextMenuKey = @"SOFTWARE\Classes\Directory\shell\AppLock";
+
+    private static void InstallContextMenu(string agentPath)
+    {
+        using var key = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(ContextMenuKey, writable: true);
+        key.SetValue("MUIVerb", "应用锁：锁定 / 解锁此文件夹");
+        key.SetValue("Icon", $"\"{agentPath}\",0");
+        using var cmd = key.CreateSubKey("command", writable: true);
+        cmd.SetValue("", $"\"{agentPath}\" --folder \"%1\"");
+    }
+
+    private static void RemoveContextMenu()
+    {
+        try { Microsoft.Win32.Registry.LocalMachine.DeleteSubKeyTree(ContextMenuKey, throwOnMissingSubKey: false); }
+        catch { /* ignore */ }
+    }
+
     /// <summary>
-    /// 注册“任意用户登录时以最高权限启动托盘程序”的计划任务。
-    /// 用计划任务而不是 Run 键，是因为 requireAdministrator 的程序放在 Run 键里会被 UAC 静默拦截。
+    /// 从非管理员进程发起安装/卸载：以管理员身份运行服务程序的 install/uninstall 子命令并等待结束。
+    /// 用户在 UAC 上点“否”会抛 Win32Exception(1223)。
+    /// </summary>
+    public static void RunElevated(string servicePath, string arguments)
+    {
+        var psi = new ProcessStartInfo(servicePath, arguments)
+        {
+            UseShellExecute = true,
+            Verb = "runas",
+            WorkingDirectory = Path.GetDirectoryName(servicePath),
+            WindowStyle = ProcessWindowStyle.Hidden,
+        };
+        using var p = Process.Start(psi) ?? throw new InvalidOperationException("无法启动服务程序");
+        p.WaitForExit();
+        if (p.ExitCode != 0)
+            throw new InvalidOperationException($"操作失败（退出码 {p.ExitCode}），详情见 service.log");
+    }
+
+    /// <summary>
+    /// 注册“任意用户登录时启动托盘程序”的计划任务（普通权限；托盘不需要管理员，安装/卸载时才单独提权）。
+    /// 用计划任务而不是 HKLM Run 键，是为了对所有用户生效且不依赖各自的注册表配置单元。
     /// </summary>
     private static void InstallAgentTask(string agentPath)
     {
@@ -104,7 +180,7 @@ public static class ServiceInstaller
               <Principals>
                 <Principal id="Author">
                   <GroupId>S-1-5-32-545</GroupId>
-                  <RunLevel>HighestAvailable</RunLevel>
+                  <RunLevel>LeastPrivilege</RunLevel>
                 </Principal>
               </Principals>
               <Settings>

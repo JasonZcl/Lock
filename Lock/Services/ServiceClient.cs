@@ -40,6 +40,7 @@ public sealed class ServiceClient : IDisposable
     public event Action<UnlockRequestEvent>? UnlockRequested;
     public event Action<UnlockClosedEvent>? UnlockClosed;
     public event Action? SettingsChanged;
+    public event Action? FoldersChanged;
 
     public ServiceClient(Dispatcher dispatcher)
     {
@@ -132,6 +133,9 @@ public sealed class ServiceClient : IDisposable
                     break;
                 case Protocol.EvSettingsChanged:
                     Raise(SettingsChanged);
+                    break;
+                case Protocol.EvFoldersChanged:
+                    Raise(FoldersChanged);
                     break;
             }
         }
@@ -247,6 +251,36 @@ public sealed class ServiceClient : IDisposable
 
     public Task UnlockCancelAsync(string requestId)
         => RequestAsync<Empty>(Protocol.UnlockCancel, new UnlockCancelData { RequestId = requestId });
+
+    // ---- 文件夹锁 ----
+
+    public Task<ApiResult<FolderStatusData>> FolderStatusAsync(string path)
+        => RequestAsync<FolderStatusData>(Protocol.FolderStatus, new FolderPathData { Path = path });
+
+    public Task<ApiResult<FolderListData>> FolderListAsync()
+        => RequestAsync<FolderListData>(Protocol.FolderList, null, withToken: true);
+
+    public Task<ApiResult<Empty>> FolderAddAsync(string path)
+        => RequestAsync<Empty>(Protocol.FolderAdd, new FolderPathData { Path = path }, withToken: true);
+
+    public Task<ApiResult<Empty>> FolderRemoveAsync(string path)
+        => RequestAsync<Empty>(Protocol.FolderRemove, new FolderPathData { Path = path }, withToken: true);
+
+    public Task<ApiResult<Empty>> FolderLockAsync(string path)
+        => RequestAsync<Empty>(Protocol.FolderLock, new FolderPathData { Path = path });
+
+    /// <summary>password 为 null 时以当前登录 token 鉴权（管理界面），否则用密码（右键菜单）。</summary>
+    public Task<ApiResult<Empty>> FolderUnlockAsync(string path, string? password)
+        => RequestAsync<Empty>(Protocol.FolderUnlock, new FolderUnlockData { Path = path, Password = password }, withToken: password == null);
+
+    /// <summary>等待连接建立（右键菜单等一次性流程用）。</summary>
+    public async Task<bool> WaitConnectedAsync(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (!IsConnected && DateTime.UtcNow < deadline)
+            await Task.Delay(100);
+        return IsConnected;
+    }
 
     public void Dispose()
     {

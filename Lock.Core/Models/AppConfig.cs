@@ -16,8 +16,27 @@ public sealed class AppConfig
 
     public LockSettings Settings { get; set; } = new();
 
+    /// <summary>被锁文件夹及其运行时状态（原始权限必须持久化，否则无法恢复）。</summary>
+    public List<LockedFolder> Folders { get; set; } = [];
+
     [JsonIgnore]
     public bool HasPassword => Password != null;
+}
+
+public sealed class LockedFolder
+{
+    /// <summary>完整路径（已规范化，无结尾反斜杠）。</summary>
+    public string Path { get; set; } = "";
+
+    public string DisplayName { get; set; } = "";
+
+    /// <summary>锁定前的安全描述符（SDDL：所有者 + 组 + DACL），解锁时据此恢复。</summary>
+    public string? OriginalSddl { get; set; }
+
+    public bool Locked { get; set; }
+
+    /// <summary>最近一次解锁时间（UTC），用于自动重新锁定。</summary>
+    public DateTime? UnlockedAtUtc { get; set; }
 }
 
 /// <summary>PBKDF2 哈希后的密钥记录。</summary>
@@ -41,6 +60,9 @@ public sealed class LockSettings
 
     /// <summary>是否暂停保护。</summary>
     public bool Paused { get; set; }
+
+    /// <summary>文件夹解锁后多少分钟自动重新锁定（0 表示不自动锁，直到注销/手动锁定）。</summary>
+    public int FolderRelockMinutes { get; set; } = 10;
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<MatchMode>))]

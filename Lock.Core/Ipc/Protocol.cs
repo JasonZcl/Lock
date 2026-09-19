@@ -28,6 +28,15 @@ public static class Protocol
     public const string UnlockAttempt = "unlockAttempt";
     public const string UnlockCancel = "unlockCancel";
 
+    // ---- 文件夹锁 ----
+    public const string FolderStatus = "folderStatus";   // 查询某路径状态（右键菜单用），无需登录
+    public const string FolderList = "folderList";       // 需 token
+    public const string FolderAdd = "folderAdd";         // 需 token；加入并立即锁定
+    public const string FolderRemove = "folderRemove";   // 需 token；恢复权限并移除
+    public const string FolderLock = "folderLock";       // 锁定方向是安全的，无需登录
+    public const string FolderUnlock = "folderUnlock";   // 用密码解锁（右键菜单）；或带 token 免密
+    public const string EvFoldersChanged = "foldersChanged";
+
     // ---- 事件类型 ----
     public const string EvUnlockRequest = "unlockRequest";
     public const string EvUnlockClosed = "unlockClosed";
@@ -113,4 +122,39 @@ public sealed class UnlockClosedEvent
 {
     public string RequestId { get; set; } = "";
     public string Reason { get; set; } = "";
+}
+
+public sealed class FolderPathData
+{
+    public string Path { get; set; } = "";
+}
+
+public sealed class FolderUnlockData
+{
+    public string Path { get; set; } = "";
+    /// <summary>右键菜单流程用密码；管理界面已登录时可为空（以 token 鉴权）。</summary>
+    public string? Password { get; set; }
+}
+
+public sealed class FolderInfo
+{
+    public string Path { get; set; } = "";
+    public string DisplayName { get; set; } = "";
+    public bool Locked { get; set; }
+    /// <summary>已解锁时距自动重新锁定还有多少秒；不自动锁或已锁定为 null。</summary>
+    public int? RelockInSeconds { get; set; }
+}
+
+public sealed class FolderStatusData
+{
+    public bool Managed { get; set; }
+    public FolderInfo? Folder { get; set; }
+    /// <summary>未纳管时：该路径不允许被锁的原因；可锁为 null。</summary>
+    public string? ForbiddenReason { get; set; }
+    public int RelockMinutes { get; set; }
+}
+
+public sealed class FolderListData
+{
+    public List<FolderInfo> Folders { get; set; } = [];
 }

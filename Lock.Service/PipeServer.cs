@@ -16,12 +16,18 @@ public sealed class PipeServer
     private readonly ConfigManager _config;
     private readonly AgentHub _agents;
     private readonly LockEngine _engine;
+    private readonly FolderManager _folders;
 
-    public PipeServer(ConfigManager config, AgentHub agents, LockEngine engine)
+    public PipeServer(ConfigManager config, AgentHub agents, LockEngine engine, FolderManager folders)
     {
         _config = config;
         _agents = agents;
         _engine = engine;
+        _folders = folders;
+        _folders.Changed += () =>
+        {
+            foreach (var c in _agents.All()) _ = c.SendEventAsync(Protocol.EvFoldersChanged, new { });
+        };
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -119,6 +125,14 @@ public sealed class PipeServer
             Protocol.UnlockAttempt => HandleAttempt(client, Get<UnlockAttemptData>(data)),
             Protocol.UnlockCancel => Do(() => _engine.Cancel(client, Get<UnlockCancelData>(data).RequestId)),
 
+            // 文件夹锁
+            Protocol.FolderStatus => Ok(_folders.Status(Get<FolderPathData>(data).Path)),
+            Protocol.FolderLock => Result(_folders.Lock(Get<FolderPathData>(data).Path, client.UserName)),
+            Protocol.FolderUnlock => HandleFolderUnlock(client, token, Get<FolderUnlockData>(data)),
+            Protocol.FolderList => Auth(token, () => Ok(_folders.List())),
+            Protocol.FolderAdd => Auth(token, () => Result(_folders.Add(Get<FolderPathData>(data).Path, client.UserName))),
+            Protocol.FolderRemove => Auth(token, () => Result(_folders.Remove(Get<FolderPathData>(data).Path, client.UserName))),
+
             // 以下需要登录
             Protocol.GetSettings => Auth(token, () => Ok(_config.GetSettings())),
             Protocol.SetSettings => Auth(token, () => HandleSetSettings(client, Get<LockSettings>(data))),
@@ -207,6 +221,24 @@ public sealed class PipeServer
         var (entries, total) = LogStore.ReadPage(Math.Max(0, d.Offset), Math.Clamp(d.Count, 1, 500));
         return Ok(new LogListData { Entries = entries, Total = total });
     }
+
+    private JsonObject HandleFolderUnlock(ClientSession client, string? token, FolderUnlockData d)
+    {
+        // 管理界面已登录 → 免密；右键菜单 → 必须给密码（同样受暴力破解锁定约束）
+        if (!_config.ValidateToken(token))
+        {
+            if (_config.LockoutRemainingSeconds is { } locked)
+                return Fail($"错误次数过多，请 {locked} 秒后再试", "lockout");
+            if (string.IsNullOrEmpty(d.Password) || !_config.VerifyPassword(d.Password))
+            {
+                LogStore.Append(new LogEntry { Event = LogEvents.FolderUnlockFailed, FullPath = d.Path, DisplayName = Path.GetFileName(d.Path), SessionId = client.SessionId, User = client.UserName });
+                return Fail(_config.LockoutRemainingSeconds is { } l2 ? $"密码错误，错误次数过多，已锁定 {l2} 秒" : "密码错误");
+            }
+        }
+        return Result(_folders.Unlock(d.Path, client.UserName));
+    }
+
+    private static JsonObject Result(string? error) => error == null ? Ok(new { }) : Fail(error);
 
     private JsonObject HandleAttempt(ClientSession client, UnlockAttemptData d)
         => Ok(_engine.Attempt(client, d.RequestId, d.Password));

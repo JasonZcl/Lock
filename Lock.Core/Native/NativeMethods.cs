@@ -72,6 +72,83 @@ public static partial class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool fAttach);
 
+    // ---- 令牌特权（改文件夹所有者需要 SeRestorePrivilege）----
+
+    private const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
+    private const uint TOKEN_QUERY = 0x0008;
+    private const uint SE_PRIVILEGE_ENABLED = 0x0002;
+
+    // 原生布局：DWORD PrivilegeCount; LUID{DWORD,LONG} Luid; DWORD Attributes —— 全部 4 字节对齐，共 16 字节。
+    // 必须 Pack=4：否则 long 会被对齐到偏移 8，整个结构错位，AdjustTokenPrivileges 收到垃圾 LUID 报“特权未分配”。
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    private struct TOKEN_PRIVILEGES
+    {
+        public uint PrivilegeCount;
+        public long Luid;
+        public uint Attributes;
+    }
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool OpenProcessToken(nint processHandle, uint desiredAccess, out nint tokenHandle);
+
+    [LibraryImport("advapi32.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool LookupPrivilegeValueW(string? systemName, string name, out long luid);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool AdjustTokenPrivileges(nint tokenHandle, [MarshalAs(UnmanagedType.Bool)] bool disableAll, ref TOKEN_PRIVILEGES newState, uint bufferLength, nint previousState, nint returnLength);
+
+    [LibraryImport("kernel32.dll")]
+    private static partial nint GetCurrentProcess();
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(nint handle);
+
+    /// <summary>在当前进程令牌上启用一个特权。返回是否成功（特权不存在或无权时为 false）。</summary>
+    public static bool EnablePrivilege(string name)
+    {
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out var token)) return false;
+        try
+        {
+            if (!LookupPrivilegeValueW(null, name, out var luid)) return false;
+            var tp = new TOKEN_PRIVILEGES { PrivilegeCount = 1, Luid = luid, Attributes = SE_PRIVILEGE_ENABLED };
+            if (!AdjustTokenPrivileges(token, false, ref tp, 0, 0, 0)) return false;
+            // AdjustTokenPrivileges 对“未分配的特权”也返回 true，要看 LastError 是否 ERROR_NOT_ALL_ASSIGNED(1300)
+            return Marshal.GetLastPInvokeError() == 0;
+        }
+        finally
+        {
+            CloseHandle(token);
+        }
+    }
+
+    // ---- 通知资源管理器刷新 ----
+
+    private const uint SHCNE_UPDATEDIR = 0x00001000;
+    private const uint SHCNE_UPDATEITEM = 0x00002000;
+    private const uint SHCNF_PATHW = 0x0005;
+    private const uint SHCNF_FLUSH = 0x1000;
+
+    [LibraryImport("shell32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial void SHChangeNotify(uint eventId, uint flags, string? item1, string? item2);
+
+    /// <summary>让资源管理器刷新某个文件夹（及其父目录中的显示）。</summary>
+    public static void NotifyFolderChanged(string path)
+    {
+        try
+        {
+            SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, path, null);
+            SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW | SHCNF_FLUSH, path, null);
+        }
+        catch
+        {
+            // 仅用于刷新显示，失败无妨
+        }
+    }
+
     /// <summary>
     /// 枚举当前所有进程 ID。比 Process.GetProcesses() 轻量得多，适合高频轮询。
     /// </summary>

@@ -29,6 +29,22 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        DispatcherUnhandledException += (_, args) =>
+        {
+            MessageBox.Show("发生未处理的错误：\n" + args.Exception, "应用锁", MessageBoxButton.OK, MessageBoxImage.Error);
+            args.Handled = true;
+        };
+
+        // 右键菜单：AppLock.exe --folder "路径"。独立于托盘实例，不占单实例互斥体，做完就退出
+        var folderArg = Array.IndexOf(e.Args, "--folder");
+        if (folderArg >= 0 && folderArg + 1 < e.Args.Length)
+        {
+            Client = new ServiceClient(Dispatcher);
+            Client.Start();
+            _ = FolderCommand.RunAsync(Client, e.Args[folderArg + 1]).ContinueWith(_ => Dispatcher.Invoke(Shutdown));
+            return;
+        }
+
         _mutex = new Mutex(true, MutexName, out var createdNew);
         if (!createdNew)
         {
@@ -36,12 +52,6 @@ public partial class App : Application
             Shutdown();
             return;
         }
-
-        DispatcherUnhandledException += (_, args) =>
-        {
-            MessageBox.Show("发生未处理的错误：\n" + args.Exception, "应用锁", MessageBoxButton.OK, MessageBoxImage.Error);
-            args.Handled = true;
-        };
 
         Client = new ServiceClient(Dispatcher);
         Client.Connected += OnConnected;

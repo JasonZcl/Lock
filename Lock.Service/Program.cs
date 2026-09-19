@@ -5,27 +5,38 @@ using Lock.Service;
 // 无参数：作为 Windows 服务运行
 if (args.Length > 0)
 {
-    switch (args[0].ToLowerInvariant())
+    try
     {
-        case "install":
+        switch (args[0].ToLowerInvariant())
         {
-            var servicePath = Environment.ProcessPath!;
-            var agentPath = args.Length > 1
-                ? Path.GetFullPath(args[1])
-                : Path.Combine(Path.GetDirectoryName(servicePath)!, "AppLock.exe");
-            ServiceInstaller.Install(servicePath, agentPath);
-            Console.WriteLine("服务已安装并启动。");
-            return 0;
+            case "install":
+            {
+                var servicePath = Environment.ProcessPath!;
+                var agentPath = args.Length > 1
+                    ? Path.GetFullPath(args[1])
+                    : Path.Combine(Path.GetDirectoryName(servicePath)!, "AppLock.exe");
+                ServiceInstaller.Install(servicePath, agentPath);
+                ServiceLog.Info("服务已安装并启动");
+                Console.WriteLine("服务已安装并启动。");
+                return 0;
+            }
+            case "uninstall":
+                ServiceInstaller.Uninstall(keepData: !args.Contains("--purge"));
+                Console.WriteLine("服务已卸载。");
+                return 0;
+            case "run":
+                break; // 前台运行，方便调试
+            default:
+                Console.WriteLine("用法：AppLock.Service.exe [install [托盘程序路径] | uninstall [--purge] | run]");
+                return 1;
         }
-        case "uninstall":
-            ServiceInstaller.Uninstall(keepData: !args.Contains("--purge"));
-            Console.WriteLine("服务已卸载。");
-            return 0;
-        case "run":
-            break; // 前台运行，方便调试
-        default:
-            Console.WriteLine("用法：AppLock.Service.exe [install [托盘程序路径] | uninstall [--purge] | run]");
-            return 1;
+    }
+    catch (Exception ex)
+    {
+        // 托盘程序是提权启动本进程的，只能看到退出码，详细原因要落到日志里
+        ServiceLog.Error($"{args[0]} 失败", ex);
+        Console.Error.WriteLine(ex.Message);
+        return 1;
     }
 }
 

@@ -8,6 +8,7 @@ public sealed class LockWorker : BackgroundService
     private ConfigManager? _config;
     private AgentHub? _agents;
     private LockEngine? _engine;
+    private FolderManager? _folders;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -17,8 +18,10 @@ public sealed class LockWorker : BackgroundService
         _agents = new AgentHub();
         _engine = new LockEngine(_config, _agents);
         _engine.Start();
+        _folders = new FolderManager(_config, _agents);
+        _folders.Start();
 
-        var server = new PipeServer(_config, _agents, _engine);
+        var server = new PipeServer(_config, _agents, _engine, _folders);
         try
         {
             await server.RunAsync(stoppingToken);
@@ -38,6 +41,7 @@ public sealed class LockWorker : BackgroundService
     {
         await base.StopAsync(cancellationToken);
         _engine?.Dispose();
+        _folders?.Dispose();
         ServiceLog.Info("服务停止");
     }
 }

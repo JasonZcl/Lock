@@ -33,9 +33,9 @@ Write-Host "==> 复制文件  $PublishDir  ->  $InstallDir" -ForegroundColor Cya
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item "$PublishDir\*" $InstallDir -Recurse -Force
 
-Write-Host "==> 启动服务" -ForegroundColor Cyan
-sc.exe start AppLockService | Out-Null
-Start-Sleep -Seconds 1
+Write-Host "==> 重新安装服务（更新路径 / 计划任务 / 右键菜单）并启动" -ForegroundColor Cyan
+& "$InstallDir\AppLock.Service.exe" install "$InstallDir\AppLock.exe"
+if ($LASTEXITCODE -ne 0) { throw "服务安装失败，见 C:\ProgramData\AppLock\service.log" }
 sc.exe query AppLockService | Select-String "STATE"
 
 Write-Host "==> 启动托盘程序" -ForegroundColor Cyan

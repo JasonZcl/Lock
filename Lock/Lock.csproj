@@ -8,6 +8,8 @@
         <AssemblyName>AppLock</AssemblyName>
         <RootNamespace>Lock</RootNamespace>
         <ApplicationManifest>app.manifest</ApplicationManifest>
+        <!-- 嵌入 exe 的图标：资源管理器、任务栏、右键菜单（注册表 Icon="AppLock.exe",0）都用它 -->
+        <ApplicationIcon>Assets\applock.ico</ApplicationIcon>
         <!-- WFO0003：WinForms 分析器建议不要在 manifest 里配置 DPI，但本项目主体是 WPF，manifest 方式是正确的 -->
         <NoWarn>$(NoWarn);WFO0003</NoWarn>
     </PropertyGroup>

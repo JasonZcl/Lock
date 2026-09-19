@@ -35,4 +35,12 @@ public static class LogEvents
     public const string PasswordReset = "密码已通过恢复密钥重置";
     public const string SettingsChanged = "设置已修改";
     public const string LoginFailed = "管理登录密码错误";
+
+    public const string FolderAdded = "文件夹已加入";
+    public const string FolderRemoved = "文件夹已移除";
+    public const string FolderLocked = "文件夹已锁定";
+    public const string FolderUnlocked = "文件夹已解锁";
+    public const string FolderRelocked = "文件夹自动重新锁定";
+    public const string FolderUnlockFailed = "文件夹解锁密码错误";
+    public const string FolderError = "文件夹操作失败";
 }

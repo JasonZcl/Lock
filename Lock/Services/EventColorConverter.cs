@@ -20,10 +20,10 @@ public sealed class EventColorConverter : IValueConverter
     {
         var pair = (value as string) switch
         {
-            LogEvents.Unlocked => Success,
-            LogEvents.WrongPassword or LogEvents.AttemptsExceeded or LogEvents.LoginFailed => Danger,
-            LogEvents.Cancelled or LogEvents.NoAgent or LogEvents.AgentLost or LogEvents.SuspendFailed => Warn,
-            LogEvents.GracePass or LogEvents.ChildPass => Info,
+            LogEvents.Unlocked or LogEvents.FolderLocked or LogEvents.FolderRelocked => Success,
+            LogEvents.WrongPassword or LogEvents.AttemptsExceeded or LogEvents.LoginFailed or LogEvents.FolderUnlockFailed or LogEvents.FolderError => Danger,
+            LogEvents.Cancelled or LogEvents.NoAgent or LogEvents.AgentLost or LogEvents.SuspendFailed or LogEvents.FolderUnlocked => Warn,
+            LogEvents.GracePass or LogEvents.ChildPass or LogEvents.FolderAdded or LogEvents.FolderRemoved => Info,
             _ => Neutral,
         };
         return Foreground ? pair.Fg : pair.Bg;

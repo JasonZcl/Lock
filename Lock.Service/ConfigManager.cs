@@ -22,6 +22,29 @@ public sealed class ConfigManager
 
     public bool HasPassword { get { lock (_sync) return _config.HasPassword; } }
 
+    /// <summary>在锁内读写文件夹列表并落盘。回调返回 true 表示有修改需要保存。</summary>
+    public T UpdateFolders<T>(Func<List<LockedFolder>, (bool Changed, T Result)> action)
+    {
+        lock (_sync)
+        {
+            var (changed, result) = action(_config.Folders);
+            if (changed) ConfigStore.Save(_config);
+            return result;
+        }
+    }
+
+    public List<LockedFolder> GetFoldersSnapshot()
+    {
+        lock (_sync)
+        {
+            return _config.Folders.Select(f => new LockedFolder
+            {
+                Path = f.Path, DisplayName = f.DisplayName, OriginalSddl = f.OriginalSddl,
+                Locked = f.Locked, UnlockedAtUtc = f.UnlockedAtUtc,
+            }).ToList();
+        }
+    }
+
     /// <summary>返回当前设置的快照（副本），调用方可自由读取。</summary>
     public LockSettings GetSettings()
     {
