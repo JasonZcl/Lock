@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <RootNamespace>Lock.Core</RootNamespace>
+        <AssemblyName>AppLock.Core</AssemblyName>
+        <!-- LibraryImport 源生成器需要 -->
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    </PropertyGroup>
+
+</Project>

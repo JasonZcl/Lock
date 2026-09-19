@@ -1,0 +1,289 @@
+<Window x:Class="Lock.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Style="{StaticResource AppWindow}"
+        Title="应用锁"
+        Width="860" Height="600"
+        MinWidth="720" MinHeight="480"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="24,20,24,16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 顶部：标题 + 状态 -->
+        <Grid Grid.Row="0" Margin="0,0,0,16">
+            <StackPanel Orientation="Horizontal">
+                <Border Width="36" Height="36" CornerRadius="8" Background="{StaticResource Accent}" Margin="0,0,12,0">
+                    <Path Data="M6,9 V6 a4,4 0 0 1 8,0 V9 M4,9 h12 v9 h-12 z M10,12.5 v2.5"
+                          Stroke="White" StrokeThickness="1.8" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                          Stretch="Uniform" Width="18" Height="18"/>
+                </Border>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="应用锁" Style="{StaticResource PageTitle}"/>
+                    <TextBlock Text="为指定程序设置启动密码" Style="{StaticResource Muted}" FontSize="12"/>
+                </StackPanel>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                <Border x:Name="ServicePill" Style="{StaticResource Pill}" Margin="0,0,8,0">
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse x:Name="ServiceDot" Width="8" Height="8" Fill="{StaticResource TextDisabled}" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="ServicePillText" Text="服务" FontSize="12"/>
+                    </StackPanel>
+                </Border>
+                <Border x:Name="ConnPill" Style="{StaticResource Pill}">
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse x:Name="ConnDot" Width="8" Height="8" Fill="{StaticResource TextDisabled}" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="ConnPillText" Text="连接" FontSize="12"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </Grid>
+
+        <TabControl x:Name="Tabs" Grid.Row="1" SelectionChanged="Tabs_SelectionChanged">
+
+            <!-- ============ 被锁程序 ============ -->
+            <TabItem x:Name="AppsTab" Header="被锁程序">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0" Margin="0,0,0,12">
+                        <StackPanel Orientation="Horizontal">
+                            <Button Content="从已安装的程序添加" Style="{StaticResource PrimaryButton}" Margin="0,0,8,0" Click="AddInstalled_Click"/>
+                            <Button Content="从运行中的程序添加" Margin="0,0,8,0" Click="AddRunning_Click"/>
+                            <Button Content="选择程序文件…" Margin="0,0,8,0" Click="AddFile_Click"/>
+                            <Button Content="移除所选" Style="{StaticResource DangerButton}" Click="Remove_Click"/>
+                        </StackPanel>
+                        <CheckBox x:Name="PauseCheck" Content="暂停保护" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                  Checked="Dirty" Unchecked="Dirty"/>
+                    </Grid>
+
+                    <ListView x:Name="AppList" Grid.Row="1" SelectionMode="Extended">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Width="56">
+                                    <GridViewColumn.Header>
+                                        <TextBlock Text="启用" HorizontalAlignment="Center"/>
+                                    </GridViewColumn.Header>
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <CheckBox IsChecked="{Binding Enabled, Mode=TwoWay}" HorizontalAlignment="Center"
+                                                      Checked="Dirty" Unchecked="Dirty"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="程序" Width="220">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Image Source="{Binding Icon}" Width="20" Height="20" Margin="4,0,10,0"
+                                                       RenderOptions.BitmapScalingMode="HighQuality"/>
+                                                <StackPanel VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                                                    <TextBlock Text="{Binding ExeName}" Foreground="{StaticResource TextMuted}" FontSize="11"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="匹配方式" Width="120">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <ComboBox SelectedIndex="{Binding MatchIndex, Mode=TwoWay}" Width="100" MinHeight="28"
+                                                      IsEnabled="{Binding HasPath}" SelectionChanged="Dirty">
+                                                <ComboBoxItem Content="文件名"/>
+                                                <ComboBoxItem Content="完整路径"/>
+                                            </ComboBox>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="路径" Width="420">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding FullPath}" Foreground="{StaticResource TextMuted}"
+                                                       TextTrimming="CharacterEllipsis" ToolTip="{Binding FullPath}"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
+
+                    <Grid Grid.Row="2" Margin="0,12,0,0">
+                        <TextBlock Style="{StaticResource Muted}" VerticalAlignment="Center"
+                                   Text="提示：多进程程序（如企业微信、浏览器）请锁主程序本身，不要锁它目录下的组件。"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <TextBlock x:Name="DirtyHint" Text="● 有未保存的更改" Foreground="{StaticResource Warning}"
+                                       VerticalAlignment="Center" Margin="0,0,12,0" Visibility="Hidden"/>
+                            <Button x:Name="SaveButton" Content="保存" Style="{StaticResource PrimaryButton}" MinWidth="96" Click="Save_Click"/>
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
+            <!-- ============ 日志 ============ -->
+            <TabItem x:Name="LogTab" Header="解锁日志">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0" Margin="0,0,0,12">
+                        <StackPanel Orientation="Horizontal">
+                            <Button Content="刷新" Click="RefreshLog_Click"/>
+                            <TextBlock x:Name="LogCountText" VerticalAlignment="Center" Margin="12,0,0,0" Style="{StaticResource Muted}"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <TextBlock Text="每页" VerticalAlignment="Center" Margin="0,0,6,0" Style="{StaticResource Muted}"/>
+                            <ComboBox x:Name="PageSizeBox" Width="72" SelectedIndex="1" SelectionChanged="PageSize_Changed">
+                                <ComboBoxItem Content="20"/>
+                                <ComboBoxItem Content="50"/>
+                                <ComboBoxItem Content="100"/>
+                                <ComboBoxItem Content="200"/>
+                            </ComboBox>
+                        </StackPanel>
+                    </Grid>
+
+                    <ListView x:Name="LogList" Grid.Row="1">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="时间" Width="150">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Time, StringFormat='MM-dd HH:mm:ss'}" Foreground="{StaticResource TextMuted}"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="事件" Width="170">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <Border Style="{StaticResource Pill}" HorizontalAlignment="Left" Padding="8,2"
+                                                    Background="{Binding Event, Converter={StaticResource EventBgConverter}}">
+                                                <TextBlock Text="{Binding Event}" FontSize="12"
+                                                           Foreground="{Binding Event, Converter={StaticResource EventFgConverter}}"/>
+                                            </Border>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="程序" Width="160" DisplayMemberBinding="{Binding DisplayName}"/>
+                                <GridViewColumn Header="用户" Width="110" DisplayMemberBinding="{Binding User}"/>
+                                <GridViewColumn Header="PID" Width="70" DisplayMemberBinding="{Binding Pid}"/>
+                                <GridViewColumn Header="备注" Width="220">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Detail}" Foreground="{StaticResource TextMuted}" TextTrimming="CharacterEllipsis"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
+
+                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,12,0,0">
+                        <Button x:Name="FirstPageButton" Content="首页" Style="{StaticResource SmallButton}" Click="FirstPage_Click"/>
+                        <Button x:Name="PrevPageButton" Content="上一页" Style="{StaticResource SmallButton}" Margin="6,0,0,0" Click="PrevPage_Click"/>
+                        <TextBlock x:Name="PageText" VerticalAlignment="Center" Margin="16,0" MinWidth="60" TextAlignment="Center"/>
+                        <Button x:Name="NextPageButton" Content="下一页" Style="{StaticResource SmallButton}" Click="NextPage_Click"/>
+                        <Button x:Name="LastPageButton" Content="末页" Style="{StaticResource SmallButton}" Margin="6,0,0,0" Click="LastPage_Click"/>
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+
+            <!-- ============ 设置 ============ -->
+            <TabItem x:Name="SettingsTab" Header="设置">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel MaxWidth="640" HorizontalAlignment="Left">
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,16">
+                            <StackPanel>
+                                <TextBlock Text="解锁行为" Style="{StaticResource SectionTitle}"/>
+                                <Grid Margin="0,8,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="150"/>
+                                        <ColumnDefinition Width="90"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="解锁后宽限期（秒）" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="GraceBox" Grid.Row="0" Grid.Column="1" TextChanged="Dirty"/>
+                                    <TextBlock Grid.Row="0" Grid.Column="2" Text="0 表示每次启动都需要密码" Style="{StaticResource Muted}"
+                                               VerticalAlignment="Center" Margin="12,0,0,0"/>
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="最多尝试次数" VerticalAlignment="Center" Margin="0,12,0,0"/>
+                                    <TextBox x:Name="AttemptsBox" Grid.Row="1" Grid.Column="1" Margin="0,12,0,0" TextChanged="Dirty"/>
+                                    <TextBlock Grid.Row="1" Grid.Column="2" Text="输错这么多次后结束目标程序" Style="{StaticResource Muted}"
+                                               VerticalAlignment="Center" Margin="12,12,0,0"/>
+                                </Grid>
+                                <Button Content="保存设置" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left" Margin="0,16,0,0" Click="Save_Click"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <TextBlock Text="密码" Style="{StaticResource SectionTitle}"/>
+                                <TextBlock Style="{StaticResource Muted}" Margin="0,0,0,12"
+                                           Text="修改或重置密码后会生成新的恢复密钥，旧密钥立即失效。"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Content="修改密码…" Margin="0,0,8,0" Click="ChangePassword_Click"/>
+                                    <Button Content="用恢复密钥重置密码…" Click="ResetPassword_Click"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- ============ 服务 ============ -->
+            <TabItem x:Name="ServiceTab" Header="服务">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel MaxWidth="640" HorizontalAlignment="Left">
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,16">
+                            <StackPanel>
+                                <TextBlock Text="后台服务" Style="{StaticResource SectionTitle}"/>
+                                <TextBlock Style="{StaticResource Muted}" Margin="0,0,0,14"
+                                           Text="拦截、挂起和密码校验都由以 SYSTEM 身份运行的 Windows 服务完成；本托盘程序只负责弹窗和管理。服务未运行时应用锁不生效。"/>
+                                <Grid Margin="0,0,0,14">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="140"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="服务状态" Style="{StaticResource Muted}" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="ServiceStateText" Grid.Column="1" FontWeight="SemiBold" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                                    <TextBlock Grid.Column="2" Text="连接状态" Style="{StaticResource Muted}" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="ConnStateText" Grid.Column="3" FontWeight="SemiBold" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                                </Grid>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button x:Name="InstallButton" Content="安装并启动服务" Style="{StaticResource PrimaryButton}" Margin="0,0,8,0" Click="Install_Click"/>
+                                    <Button x:Name="UninstallButton" Content="停止并卸载服务" Style="{StaticResource DangerButton}" Margin="0,0,8,0" Click="Uninstall_Click"/>
+                                    <Button Content="刷新状态" Click="RefreshService_Click"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource InfoBox}">
+                            <StackPanel>
+                                <TextBlock x:Name="ServicePathText" Style="{StaticResource Muted}" Foreground="{StaticResource Text}"/>
+                                <TextBlock Style="{StaticResource Muted}" Margin="0,6,0,0"
+                                           Text="安装服务时会同时注册“登录时以最高权限启动托盘程序”的计划任务，卸载时一并删除。"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
+
+        <TextBlock Grid.Row="2" Margin="0,12,0,0" Style="{StaticResource Muted}" FontSize="12"
+                   Text="关闭此窗口后托盘程序继续运行。托盘程序退出后，被锁程序启动时会被服务直接结束。"/>
+    </Grid>
+</Window>

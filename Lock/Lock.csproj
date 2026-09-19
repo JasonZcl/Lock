@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>WinExe</OutputType>
+        <UseWPF>true</UseWPF>
+        <!-- 托盘图标使用 WinForms 的 NotifyIcon -->
+        <UseWindowsForms>true</UseWindowsForms>
+        <AssemblyName>AppLock</AssemblyName>
+        <RootNamespace>Lock</RootNamespace>
+        <ApplicationManifest>app.manifest</ApplicationManifest>
+        <!-- WFO0003：WinForms 分析器建议不要在 manifest 里配置 DPI，但本项目主体是 WPF，manifest 方式是正确的 -->
+        <NoWarn>$(NoWarn);WFO0003</NoWarn>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <!-- 移除 WinForms 的全局 using，避免与 WPF 的 Application/MessageBox 等类型冲突 -->
+        <Using Remove="System.Windows.Forms" />
+        <Using Remove="System.Drawing" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Lock.Core\Lock.Core.csproj" />
+    </ItemGroup>
+
+</Project>

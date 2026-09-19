@@ -1,0 +1,15 @@
+<Application x:Class="Lock.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:svc="clr-namespace:Lock.Services"
+             ShutdownMode="OnExplicitShutdown">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Themes/Theme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+            <svc:EventColorConverter x:Key="EventBgConverter"/>
+            <svc:EventColorConverter x:Key="EventFgConverter" Foreground="True"/>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>
