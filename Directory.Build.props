@@ -1,5 +1,9 @@
 <Project>
     <PropertyGroup>
+        <!-- 产品版本：exe 文件属性与安装包共用，发版时改这里 -->
+        <Version>1.0.0</Version>
+        <Product>应用锁</Product>
+        <Company>ZhaoCongLin</Company>
         <TargetFramework>net10.0-windows</TargetFramework>
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>

@@ -27,42 +27,69 @@
 
 ## 打包
 
-在项目目录打开 PowerShell：
+### 安装包（推荐分发方式）
 
 ```powershell
 cd E:\Jason\MyGit\Lock
-.\publish.ps1                  # 框架依赖版，约 3 MB（本机已有 .NET 10，直接可用）
-.\publish.ps1 -SelfContained   # 自包含版，约 150 MB，给没装 .NET 的电脑用
+.\build-installer.ps1                  # 生成 dist\AppLock-Setup-<版本>.exe（约 2.5 MB，需目标机器已装 .NET 10 桌面运行时）
+.\build-installer.ps1 -SelfContained   # 自带运行时（约 150 MB），任何 Win10/11 x64 直接装
+.\build-installer.ps1 -Version 1.2.0   # 指定版本号；默认取 Directory.Build.props 里的 <Version>
 ```
 
-输出在 `publish\`，里面 `AppLock.exe`（托盘程序）和 `AppLock.Service.exe`（服务）必须放在**同一目录**。
+需要 [Inno Setup 6](https://jrsoftware.org/isinfo.php)：`winget install --id JRSoftware.InnoSetup -e --scope user`。脚本在 `installer\AppLock.iss`，简体中文语言文件已随仓库提供。
 
-也可以手动执行等价命令：
+安装包会：检测 .NET 运行时（没有则引导下载）→ 停掉旧版本 → 复制到 `Program Files\AppLock` → 注册服务、计划任务、右键菜单 → 创建开始菜单/桌面快捷方式 → 可选立即启动。**覆盖安装即升级**，配置保留。控制面板“程序和功能”里可卸载；卸载会先恢复所有被锁文件夹的权限，并询问是否保留密码和配置。
+
+相关文件：
+
+| 文件 | 作用 |
+|---|---|
+| `build-installer.ps1` | 一键脚本：调用 `publish.ps1` 发布 → 用 ISCC 编译 → 输出到 `dist\` |
+| `installer\AppLock.iss` | Inno Setup 脚本：向导页面、文件、快捷方式、`[Run]` 调用 `AppLock.Service.exe install`、`[UninstallRun]` 调用 `uninstall`、.NET 检测、停旧进程等逻辑 |
+| `installer\ChineseSimplified.isl` | 简体中文语言包（Inno 官方仓库的 Unofficial 目录，默认安装不带，故放进仓库） |
+| `Lock\Assets\applock.ico` | 安装包、exe、右键菜单、托盘共用的图标；由 `tools\MakeIcon` 从主题矢量图生成 |
+| `Directory.Build.props` 的 `<Version>` | 唯一的版本号来源，exe 文件属性和安装包文件名都取自它 |
+
+发版流程：改 `<Version>` → `.\build-installer.ps1` → 分发 `dist\AppLock-Setup-<版本>.exe`。用户直接双击新版覆盖安装即可，无需先卸载。
+
+> **从便携版迁移**：如果之前是手动把 `publish\` 放到某个目录再点“安装并启动服务”，第一次改用安装包时，安装包会把服务重新指向 `Program Files\AppLock`，旧目录不会自动删除。确认新版本运行正常（托盘在线、右键菜单可用）后手动删掉旧目录即可；配置在 `ProgramData` 里，不受影响。
+
+### 便携目录（开发用）
 
 ```powershell
-dotnet publish Lock.Service/Lock.Service.csproj -c Release -r win-x64 --no-self-contained -o publish
-dotnet publish Lock/Lock.csproj            -c Release -r win-x64 --no-self-contained -o publish
+.\publish.ps1                  # 输出到 publish\，两个 exe 必须在同一目录
+.\publish.ps1 -SelfContained
 ```
 
-## 首次启动（3 步）
+## 安装
 
-1. **把 `publish` 目录整个复制到一个固定位置**，比如 `C:\Program Files\AppLock\`。
-   服务和计划任务会记录这个路径，之后不要移动，否则要重新安装服务。
+**用安装包**：双击 `AppLock-Setup-<版本>.exe`，一路下一步（会弹一次 UAC）。装完勾选“立即启动”，托盘出现锁形图标，首次连接服务时会要求**设置密码**并显示一次**恢复密钥**——务必抄下来。然后进入管理界面添加要锁的程序 / 文件夹。
 
-2. **双击 `AppLock.exe`**。
-   因为服务还没装，它会直接打开管理界面的“服务”页 → 点 **安装并启动服务**。
-   这一步（会弹一次 UAC）会做四件事：
+之后每次登录，计划任务会自动拉起托盘程序。托盘图标右键可打开管理界面（需密码）。
+
+<details>
+<summary>手动安装（便携目录方式）</summary>
+
+1. 把 `publish` 目录整个复制到固定位置（例如 `C:\Program Files\AppLock\`），之后不要移动。
+2. 双击 `AppLock.exe`，它会打开“服务”页 → 点 **安装并启动服务**（提权运行一次 `AppLock.Service.exe install`）。这一步会：
    - 创建并启动服务 `AppLockService`（自动启动、崩溃后 5 秒自动重启）
    - 创建 `C:\ProgramData\AppLock\` 并收紧 ACL（只有 SYSTEM 和管理员可访问）
    - 注册计划任务 `AppLock Agent`：任意用户登录时启动托盘程序（普通权限，不弹 UAC）
    - 注册资源管理器右键菜单“应用锁：锁定 / 解锁此文件夹”
+3. 服务启动后托盘自动连上，走设置密码流程。
 
-   托盘程序本身不需要管理员权限，点“安装/卸载”时会提权运行一次 `AppLock.Service.exe`（弹一次 UAC）。
+命令行等价操作（管理员 PowerShell）：
 
-3. 服务启动后 2 秒内托盘程序会自动连上，弹出**设置密码**窗口 → 设好后会显示一次**恢复密钥**，务必抄下来。
-   然后自动进入管理界面 → “被锁程序”页添加要锁的程序 → **保存**。
+```powershell
+cd "C:\Program Files\AppLock"
+.\AppLock.Service.exe install      # 安装并启动服务 + 计划任务 + 右键菜单
+.\AppLock.Service.exe uninstall    # 卸载（保留配置）；加 --purge 连配置一起删
+sc query AppLockService            # 查看服务状态
+```
 
-之后每次开机登录，计划任务会自动拉起托盘程序，不需要手动做任何事。托盘图标右键可打开管理界面（需密码）。
+</details>
+
+出问题时看 `C:\ProgramData\AppLock\service.log`（需要管理员权限打开）。
 
 ### 验证是否生效
 
@@ -70,20 +97,6 @@ dotnet publish Lock/Lock.csproj            -c Release -r win-x64 --no-self-conta
 - **文件夹锁**：新建一个测试文件夹，右键 → “应用锁：锁定 / 解锁此文件夹” → 输密码 → 双击该文件夹应提示“拒绝你访问该文件夹”；再右键输密码解锁即可打开。建议先用测试文件夹走一遍再锁真实资料。
 
 两类操作都会记录在管理界面“解锁日志”页。
-
-### 命令行方式（可选）
-
-```powershell
-# 管理员 PowerShell
-cd "C:\Program Files\AppLock"
-.\AppLock.Service.exe install      # 安装并启动服务 + 计划任务
-.\AppLock.Service.exe uninstall    # 卸载（保留配置）；加 --purge 连配置一起删
-sc query AppLockService            # 查看服务状态
-```
-
-出问题时看 `C:\ProgramData\AppLock\service.log`（需要管理员权限打开）。
-
-卸载：管理界面“服务”页 → **停止并卸载服务**，或上面的 `uninstall` 命令。
 
 ## 使用
 
@@ -197,7 +210,7 @@ $env:APPLOCK_PIPE = "AppLock.dev"; $env:APPLOCK_DATA = "$env:TEMP\applockdev"
 dotnet build\Debug\AppLock.Service.dll run     # 服务前台运行
 dotnet build\Debug\AppLock.dll                 # 托盘程序
 python tools\pipe_test.py                      # 协议端到端测试（模拟托盘程序，锁定 charmap.exe）
-python toolsolder_test.py                    # 文件夹锁协议测试（服务非 SYSTEM 时只覆盖错误路径）
+python tools\folder_test.py                    # 文件夹锁协议测试（服务非 SYSTEM 时只覆盖错误路径）
 ```
 
-更新已安装的版本：以管理员运行 `tools\update.ps1`（停服务 → 复制 `publish\` → 启服务 → 启托盘 → 导出日志到 `logs\`）。
+更新已安装的版本：正式用户直接双击新版安装包覆盖安装；开发时想跳过打包，可以管理员运行 `tools\update.ps1`（停服务 → 复制 `publish\` 到安装目录 → 重新注册并启动服务 → 启托盘 → 导出日志到 `logs\`），注意脚本默认安装目录参数 `-InstallDir` 要与实际一致。

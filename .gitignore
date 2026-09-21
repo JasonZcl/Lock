@@ -5,3 +5,4 @@ publish/
 .idea/
 *.user
 logs/
+dist/
