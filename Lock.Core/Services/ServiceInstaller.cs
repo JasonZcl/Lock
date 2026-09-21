@@ -10,8 +10,21 @@ namespace Lock.Core.Services;
 public static class ServiceInstaller
 {
     public const string ServiceName = "AppLockService";
-    public const string ServiceDisplayName = "AppLock 应用锁服务";
+    // 显示名不叫“应用锁”，避免在 services.msc 里一眼被认出并停掉。想改成别的低调名字改这里即可。
+    public const string ServiceDisplayName = "系统防护服务";
+    public const string ServiceDescription = "协调本机安全策略与资源保护。若停止，部分保护功能将失效。";
     public const string TaskName = "AppLock Agent";
+
+    // 加固后的服务权限（SDDL）：
+    //   SYSTEM 完全控制；Administrators 拥有除“停止/暂停”外的一切（含改权限/删除，供本工具卸载用）；
+    //   普通已认证用户仅可查询状态。
+    // 效果：services.msc / 任务管理器里的“停止”对管理员也是灰的/被拒；只有 SYSTEM 能停。
+    // 注意：管理员仍可用命令行 sc sdset 把权限改回去——这是用户态方案的上限，只挡不懂命令行的人。
+    private const string HardenedSddl =
+        "D:(A;;CCDCLCSWRPWPDTLOCRRCWDWO;;;SY)(A;;CCDCLCSWRPLOCRRCWDWOSD;;;BA)(A;;CCLCSWLOCRRC;;;AU)";
+    // 卸载前先设回可停止（授予 Administrators 停止权），否则本工具自己也停不掉服务。
+    private const string PermissiveSddl =
+        "D:(A;;CCDCLCSWRPWPDTLOCRRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRRCWDWOSD;;;BA)(A;;CCLCSWLOCRRC;;;AU)";
 
     public static bool IsAdministrator()
     {
@@ -47,6 +60,8 @@ public static class ServiceInstaller
         {
             // 已存在：不要 delete 再 create——只要有句柄没释放（服务管理器开着、刚 sc query 过），
             // create 就会报 1072“已标记为删除”。用 config 原地更新路径即可。
+            // 若上一版加固过权限，先设回可停止，否则下面 stop 会被拒。
+            Run("sc.exe", $"sdset {ServiceName} {PermissiveSddl}");
             Run("sc.exe", $"stop {ServiceName}");
             for (var i = 0; i < 40 && QueryState() == ServiceState.Running; i++)
                 Thread.Sleep(250);
@@ -56,10 +71,14 @@ public static class ServiceInstaller
         {
             Check(Run("sc.exe", $"create {ServiceName} binPath= {quotedPath} start= auto DisplayName= \"{ServiceDisplayName}\""));
         }
-        Run("sc.exe", $"description {ServiceName} \"拦截被锁定的程序并要求输入密码。\"");
-        // 崩溃后 5 秒自动重启
+        Run("sc.exe", $"description {ServiceName} \"{ServiceDescription}\"");
+        // 崩溃 / 被强杀后 5 秒自动重启（重要：deliberate 的 sc stop 不算失败不会触发，
+        // 但用任务管理器“结束”SYSTEM 进程算崩溃，会被这条拉起来）
         Run("sc.exe", $"failure {ServiceName} reset= 0 actions= restart/5000/restart/5000/restart/5000");
         Check(Run("sc.exe", $"start {ServiceName}"));
+
+        // 启动成功后再加固权限：非 SYSTEM 无法停止 / 暂停
+        Run("sc.exe", $"sdset {ServiceName} {HardenedSddl}");
 
         if (File.Exists(agentPath))
         {
@@ -77,6 +96,8 @@ public static class ServiceInstaller
 
         if (QueryState() != ServiceState.NotInstalled)
         {
+            // 加固后管理员也没有“停止”权，先把权限设回可停止（管理员保留了 WRITE_DAC 才能做到）
+            Run("sc.exe", $"sdset {ServiceName} {PermissiveSddl}");
             Run("sc.exe", $"stop {ServiceName}");
             // 等待服务真正停止，否则 delete 会标记为“已删除”但残留
             for (var i = 0; i < 20 && QueryState() == ServiceState.Running; i++)

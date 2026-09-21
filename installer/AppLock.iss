@@ -16,7 +16,8 @@
 #define AppNameEn "AppLock"
 #define AppPublisher "ZhaoCongLin"
 #define AgentExe "AppLock.exe"
-#define ServiceExe "AppLock.Service.exe"
+#define ServiceExe "SysGuardSvc.exe"
+#define OldServiceExe "AppLock.Service.exe"
 #define ServiceName "AppLockService"
 
 [Setup]
@@ -146,16 +147,61 @@ procedure StopExisting;
 var
   ResultCode: Integer;
 begin
+  // 旧版本可能已加固权限（非 SYSTEM 停不了），先把权限设回可停止。安装程序是管理员、有 WRITE_DAC。
+  Exec(ExpandConstant('{sys}\sc.exe'),
+    'sdset {#ServiceName} D:(A;;CCDCLCSWRPWPDTLOCRRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRRCWDWOSD;;;BA)(A;;CCLCSWLOCRRC;;;AU)',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#AgentExe} /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   // 等服务真正停下
   Sleep(1500);
 end;
 
+// 清理旧的“手动便携版”目录：当初把 publish 复制到某处再点“安装并启动服务”留下的。
+// 只在它确实是旧安装、且不等于本次安装目录时删除；数据在 ProgramData，不受影响。
+procedure CleanupLegacyPortable;
+var
+  Candidates: array of string;
+  Legacy, AppDir: string;
+  I: Integer;
+begin
+  AppDir := ExpandConstant('{app}');
+  // 常见的旧位置：Program Files\AppLock\publish、以及安装目录下的 publish 子目录
+  SetArrayLength(Candidates, 3);
+  Candidates[0] := ExpandConstant('{commonpf}\AppLock\publish');
+  Candidates[1] := AppDir + '\publish';
+  Candidates[2] := ExpandConstant('{commonpf64}\AppLock\publish');
+
+  for I := 0 to GetArrayLength(Candidates) - 1 do
+  begin
+    Legacy := Candidates[I];
+    // 必须存在、含有旧的 exe、且不是本次安装目录本身（publish 子目录在安装目录里也可安全删除，
+    // 因为我们直接把文件装进 {app}，不装进 {app}\publish）
+    if DirExists(Legacy)
+       and FileExists(Legacy + '\{#AgentExe}')
+       and (CompareText(Legacy, AppDir) <> 0) then
+    begin
+      Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#AgentExe} /F', '', SW_HIDE, ewWaitUntilTerminated, I);
+      DelTree(Legacy, True, True, True);
+    end;
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  OldExe: string;
 begin
   if CurStep = ssInstall then
     StopExisting;
+  // 新文件已就位、服务已重新注册指向新目录后：清理旧便携目录 + 删掉改名前的旧服务 exe
+  if CurStep = ssPostInstall then
+  begin
+    CleanupLegacyPortable;
+    // 旧版服务 exe 叫 AppLock.Service.exe，新版已改名 SysGuardSvc.exe，服务已重新指向新名，删掉旧的
+    OldExe := ExpandConstant('{app}\{#OldServiceExe}');
+    if FileExists(OldExe) then
+      DeleteFile(OldExe);
+  end;
 end;
 
 // ---- 卸载 ----

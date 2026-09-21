@@ -23,7 +23,7 @@ public partial class App : Application
     public bool IsExiting { get; private set; }
 
     public static string ServiceExePath { get; } =
-        Path.Combine(Path.GetDirectoryName(Environment.ProcessPath!)!, "AppLock.Service.exe");
+        Path.Combine(Path.GetDirectoryName(Environment.ProcessPath!)!, "SysGuardSvc.exe");
 
     protected override void OnStartup(StartupEventArgs e)
     {

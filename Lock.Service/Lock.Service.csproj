@@ -3,7 +3,13 @@
     <PropertyGroup>
         <OutputType>Exe</OutputType>
         <RootNamespace>Lock.Service</RootNamespace>
-        <AssemblyName>AppLock.Service</AssemblyName>
+        <!-- exe 文件名也伪装：任务管理器“详细信息”里显示 SysGuardSvc.exe，不露 AppLock -->
+        <AssemblyName>SysGuardSvc</AssemblyName>
+        <!-- 任务管理器“进程/详细信息”标签显示的是文件描述(AssemblyTitle)，不是服务显示名。
+             设成低调名字，避免在进程列表里露出 AppLock。Product 也一并覆盖掉全局的“应用锁”。 -->
+        <AssemblyTitle>系统防护服务</AssemblyTitle>
+        <Product>系统防护服务</Product>
+        <Description>协调本机安全策略与资源保护。</Description>
         <ApplicationManifest>app.manifest</ApplicationManifest>
         <!-- 服务在 Session 0 运行，不需要控制台窗口 -->
         <UserSecretsId>applock-service</UserSecretsId>

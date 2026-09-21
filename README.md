@@ -5,11 +5,20 @@
 - **程序锁**：被锁程序启动时立即被挂起并弹出密码框，密码正确才能继续，错误/取消则结束进程。
 - **文件夹锁**：被锁文件夹对所有用户“拒绝访问”，右键 → 输密码解锁，到期自动锁回。
 
+## 功能一览
+
+- 程序锁：三种方式添加（已安装程序 / 运行中的程序 / 手动选 exe），按完整路径或文件名匹配，支持多进程程序、解锁宽限期。
+- 文件夹锁：ACL 权限锁定，右键菜单一键锁/解锁，解锁后到期/注销/重启自动锁回。
+- 密码体系：PBKDF2 存储、恢复密钥找回、暴力破解锁定、管理登录 30 分钟 token。
+- 解锁日志：分页查看所有解锁/失败/取消/结束/设置变更记录。
+- 后台服务自我保护：低调服务名 + exe 伪装 + 拒绝停止权限 + 崩溃自动重启。
+- Inno Setup 中文安装包：向导安装、开机自启、右键菜单、覆盖升级保留数据、卸载恢复权限。
+
 ## 架构
 
 ```
 ┌──────────────────────────────┐   命名管道   ┌──────────────────────────────┐
-│  AppLock.Service.exe          │◄──────────►│  AppLock.exe（托盘程序）        │
+│  SysGuardSvc.exe（服务）       │◄──────────►│  AppLock.exe（托盘程序）        │
 │  Windows 服务，SYSTEM 权限     │  \\.\pipe\  │  用户会话，普通权限             │
 │  · 轮询进程、挂起/恢复/结束     │  AppLock.v1 │  · 解锁弹窗、右键菜单命令        │
 │  · 文件夹 ACL 锁定/恢复         │             │  · 管理界面（程序/文件夹/日志）   │
@@ -17,10 +26,14 @@
 └──────────────────────────────┘             └──────────────────────────────┘
 ```
 
+> 服务对外伪装：程序集名 `SysGuardSvc.exe`、文件描述与服务显示名均为“系统防护服务”，
+> 内部服务名仍是 `AppLockService`（代码里的常量）。要改伪装名字见 `Lock.Service/Lock.Service.csproj`
+> 的 `AssemblyTitle` 和 `Lock.Core/Services/ServiceInstaller.cs` 的 `ServiceDisplayName`。
+
 | 项目 | 说明 |
 |---|---|
-| `Lock.Core` | 共享库：配置模型、PBKDF2 密码、恢复密钥、管道协议、Win32 封装、服务安装器 |
-| `Lock.Service` | Windows 服务（`Microsoft.Extensions.Hosting.WindowsServices`） |
+| `Lock.Core` | 共享库：配置模型、PBKDF2 密码、恢复密钥、管道协议、Win32 封装、文件夹 ACL、服务安装器 |
+| `Lock.Service` | Windows 服务（`Microsoft.Extensions.Hosting.WindowsServices`），输出 `SysGuardSvc.exe` |
 | `Lock` | WPF 托盘程序（统一主题在 `Themes/Theme.xaml`，所有窗口用 `Style="{StaticResource AppWindow}"`） |
 
 三个项目输出到同一目录 `build\<Configuration>\`，托盘程序据此找到同目录的服务程序。
@@ -45,7 +58,7 @@ cd E:\Jason\MyGit\Lock
 | 文件 | 作用 |
 |---|---|
 | `build-installer.ps1` | 一键脚本：调用 `publish.ps1` 发布 → 用 ISCC 编译 → 输出到 `dist\` |
-| `installer\AppLock.iss` | Inno Setup 脚本：向导页面、文件、快捷方式、`[Run]` 调用 `AppLock.Service.exe install`、`[UninstallRun]` 调用 `uninstall`、.NET 检测、停旧进程等逻辑 |
+| `installer\AppLock.iss` | Inno Setup 脚本：向导页面、文件、快捷方式、`[Run]` 调用 `SysGuardSvc.exe install`、`[UninstallRun]` 调用 `uninstall`、.NET 检测、停旧进程等逻辑 |
 | `installer\ChineseSimplified.isl` | 简体中文语言包（Inno 官方仓库的 Unofficial 目录，默认安装不带，故放进仓库） |
 | `Lock\Assets\applock.ico` | 安装包、exe、右键菜单、托盘共用的图标；由 `tools\MakeIcon` 从主题矢量图生成 |
 | `Directory.Build.props` 的 `<Version>` | 唯一的版本号来源，exe 文件属性和安装包文件名都取自它 |
@@ -71,7 +84,7 @@ cd E:\Jason\MyGit\Lock
 <summary>手动安装（便携目录方式）</summary>
 
 1. 把 `publish` 目录整个复制到固定位置（例如 `C:\Program Files\AppLock\`），之后不要移动。
-2. 双击 `AppLock.exe`，它会打开“服务”页 → 点 **安装并启动服务**（提权运行一次 `AppLock.Service.exe install`）。这一步会：
+2. 双击 `AppLock.exe`，它会打开“服务”页 → 点 **安装并启动服务**（提权运行一次 `SysGuardSvc.exe install`）。这一步会：
    - 创建并启动服务 `AppLockService`（自动启动、崩溃后 5 秒自动重启）
    - 创建 `C:\ProgramData\AppLock\` 并收紧 ACL（只有 SYSTEM 和管理员可访问）
    - 注册计划任务 `AppLock Agent`：任意用户登录时启动托盘程序（普通权限，不弹 UAC）
@@ -82,8 +95,8 @@ cd E:\Jason\MyGit\Lock
 
 ```powershell
 cd "C:\Program Files\AppLock"
-.\AppLock.Service.exe install      # 安装并启动服务 + 计划任务 + 右键菜单
-.\AppLock.Service.exe uninstall    # 卸载（保留配置）；加 --purge 连配置一起删
+.\SysGuardSvc.exe install          # 安装并启动服务 + 计划任务 + 右键菜单
+.\SysGuardSvc.exe uninstall        # 卸载（保留配置）；加 --purge 连配置一起删
 sc query AppLockService            # 查看服务状态
 ```
 
@@ -185,7 +198,9 @@ icacls "E:\你的文件夹" /reset /T
 
 - 拦截与密码校验在 SYSTEM 服务里完成；托盘程序即使被篡改也拿不到密码哈希（配置目录普通用户不可读）。
 - 托盘程序被关闭时，被锁程序启动会被服务 **直接结束**（不会因为没人弹窗而放行）。
-- 管理员仍可停止服务（`sc stop AppLockService`）——这是任何用户态方案都无法阻止的，本项目的目标是防止普通使用者/其他账户误开或窥探，不是对抗本机管理员。
+- **服务自我保护**：安装后服务被加固——显示名是低调的“系统防护服务”；权限（DACL）设为只有 SYSTEM 能停止/暂停，管理员在 services.msc、任务管理器里点“停止”都会被拒（按钮灰或报错）；进程被强杀会在 5 秒后自动重启。**这挡得住不懂命令行的人**（包括非技术管理员）。
+- **但挡不住懂技术的管理员**：管理员保留了改权限的能力（`sc sdset` 恢复后即可停止），也能进安全模式、直接删文件。这是所有纯用户态方案的天花板，本项目的目标是防止同机的其他使用者/非技术人员误开或窥探，不是对抗铁了心的本机管理员。
+- **文件夹锁不受此影响**：它靠 NTFS 权限，状态在磁盘上，停服务只会让文件夹保持锁定（fail-closed），停服务反而不会让文件夹变可访问。
 - 服务以 SYSTEM 运行，能挂起以管理员身份运行的程序。
 - 密码 / 恢复密钥校验有暴力破解防护：连续错 5 次后开始锁定，10 s 起每次翻倍，封顶 10 分钟（锁定期内正确密码也拒绝）。
 - 服务只把解锁请求发给与它同目录的正版 `AppLock.exe`；其他程序即使连上管道也拿不到请求。
@@ -207,7 +222,7 @@ icacls "E:\你的文件夹" /reset /T
 dotnet build Lock.sln
 # 已安装正式服务时，用独立的管道名和数据目录跑开发实例，互不干扰
 $env:APPLOCK_PIPE = "AppLock.dev"; $env:APPLOCK_DATA = "$env:TEMP\applockdev"
-dotnet build\Debug\AppLock.Service.dll run     # 服务前台运行
+dotnet build\Debug\SysGuardSvc.dll run        # 服务前台运行
 dotnet build\Debug\AppLock.dll                 # 托盘程序
 python tools\pipe_test.py                      # 协议端到端测试（模拟托盘程序，锁定 charmap.exe）
 python tools\folder_test.py                    # 文件夹锁协议测试（服务非 SYSTEM 时只覆盖错误路径）

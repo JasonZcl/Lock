@@ -34,7 +34,7 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item "$PublishDir\*" $InstallDir -Recurse -Force
 
 Write-Host "==> 重新安装服务（更新路径 / 计划任务 / 右键菜单）并启动" -ForegroundColor Cyan
-& "$InstallDir\AppLock.Service.exe" install "$InstallDir\AppLock.exe"
+& "$InstallDir\SysGuardSvc.exe" install "$InstallDir\AppLock.exe"
 if ($LASTEXITCODE -ne 0) { throw "服务安装失败，见 C:\ProgramData\AppLock\service.log" }
 sc.exe query AppLockService | Select-String "STATE"
 

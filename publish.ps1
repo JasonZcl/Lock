@@ -24,4 +24,4 @@ Remove-Item "$OutDir\*.pdb" -ErrorAction SilentlyContinue
 Write-Host ""
 Write-Host "打包完成：$OutDir" -ForegroundColor Green
 Write-Host "  AppLock.exe          托盘程序（右键 -> 以管理员身份运行，首次运行在“服务”页安装服务）"
-Write-Host "  AppLock.Service.exe  服务程序（也可命令行：AppLock.Service.exe install / uninstall）"
+Write-Host "  SysGuardSvc.exe      服务程序（也可命令行：SysGuardSvc.exe install / uninstall）"

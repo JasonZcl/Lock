@@ -73,8 +73,7 @@
                                     </GridViewColumn.Header>
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
-                                            <CheckBox IsChecked="{Binding Enabled, Mode=TwoWay}" HorizontalAlignment="Center"
-                                                      Checked="Dirty" Unchecked="Dirty"/>
+                                            <CheckBox IsChecked="{Binding Enabled, Mode=TwoWay}" HorizontalAlignment="Center"/>
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
@@ -96,7 +95,7 @@
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
                                             <ComboBox SelectedIndex="{Binding MatchIndex, Mode=TwoWay}" Width="100" MinHeight="28"
-                                                      IsEnabled="{Binding HasPath}" SelectionChanged="Dirty">
+                                                      IsEnabled="{Binding HasPath}">
                                                 <ComboBoxItem Content="文件名"/>
                                                 <ComboBoxItem Content="完整路径"/>
                                             </ComboBox>

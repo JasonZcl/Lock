@@ -27,7 +27,7 @@ if (args.Length > 0)
             case "run":
                 break; // 前台运行，方便调试
             default:
-                Console.WriteLine("用法：AppLock.Service.exe [install [托盘程序路径] | uninstall [--purge] | run]");
+                Console.WriteLine("用法：SysGuardSvc.exe [install [托盘程序路径] | uninstall [--purge] | run]");
                 return 1;
         }
     }

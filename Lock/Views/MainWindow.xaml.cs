@@ -24,17 +24,33 @@ public partial class MainWindow : Window
         public string? FullPath => Model.FullPath;
         public bool HasPath => !string.IsNullOrEmpty(Model.FullPath);
 
+        /// <summary>用户真正改动某行时的回调（由绑定 setter 触发，不会在控件初始化时误报）。</summary>
+        public Action? Changed { get; set; }
+
         public bool Enabled
         {
             get => Model.Enabled;
-            set { Model.Enabled = value; Notify(nameof(Enabled)); }
+            set
+            {
+                if (Model.Enabled == value) return;
+                Model.Enabled = value;
+                Notify(nameof(Enabled));
+                Changed?.Invoke();
+            }
         }
 
         /// <summary>0 = 文件名，1 = 完整路径。</summary>
         public int MatchIndex
         {
             get => Model.MatchMode == MatchMode.FullPath ? 1 : 0;
-            set { Model.MatchMode = value == 1 ? MatchMode.FullPath : MatchMode.ExeName; Notify(nameof(MatchIndex)); }
+            set
+            {
+                var mode = value == 1 ? MatchMode.FullPath : MatchMode.ExeName;
+                if (Model.MatchMode == mode) return;
+                Model.MatchMode = mode;
+                Notify(nameof(MatchIndex));
+                Changed?.Invoke();
+            }
         }
 
         public Row(LockedApp model)
@@ -104,7 +120,7 @@ public partial class MainWindow : Window
         _loading = true;
         _settings = r.Data;
         _rows.Clear();
-        foreach (var app in _settings.LockedApps) _rows.Add(new Row(app));
+        foreach (var app in _settings.LockedApps) _rows.Add(new Row(app) { Changed = OnRowChanged });
         GraceBox.Text = _settings.UnlockGraceSeconds.ToString();
         AttemptsBox.Text = _settings.MaxAttempts.ToString();
         RelockBox.Text = _settings.FolderRelockMinutes.ToString();
@@ -156,6 +172,12 @@ public partial class MainWindow : Window
     private void Save_Click(object sender, RoutedEventArgs e) => _ = SaveAsync();
 
     private void Dirty(object sender, RoutedEventArgs e)
+    {
+        if (!_loading) SetDirty(true);
+    }
+
+    /// <summary>列表行被用户改动时的回调（启用开关 / 匹配方式）。</summary>
+    private void OnRowChanged()
     {
         if (!_loading) SetDirty(true);
     }
@@ -248,7 +270,7 @@ public partial class MainWindow : Window
 
         if (_rows.Any(r => r.Model.Key == app.Key)) return; // 已存在
 
-        _rows.Add(new Row(app));
+        _rows.Add(new Row(app) { Changed = OnRowChanged });
         SetDirty(true);
     }
 
