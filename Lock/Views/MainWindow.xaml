@@ -65,19 +65,54 @@
                     </Grid>
 
                     <ListView x:Name="AppList" Grid.Row="1" SelectionMode="Extended">
+                        <ListView.Resources>
+                            <Style x:Key="AppStatusButton" TargetType="ToggleButton">
+                                <Setter Property="Content" Value="已停用"/>
+                                <Setter Property="Background" Value="{StaticResource Bg}"/>
+                                <Setter Property="Foreground" Value="{StaticResource TextMuted}"/>
+                                <Setter Property="Padding" Value="8,4"/>
+                                <Setter Property="FontSize" Value="12"/>
+                                <Setter Property="Cursor" Value="Hand"/>
+                                <Setter Property="ToolTip" Value="点击切换启用状态，保存后生效。"/>
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="ToggleButton">
+                                            <Border x:Name="StatusPill" Background="{TemplateBinding Background}"
+                                                    CornerRadius="10" Padding="{TemplateBinding Padding}">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Ellipse Width="6" Height="6" Fill="{TemplateBinding Foreground}"
+                                                             VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                                    <ContentPresenter VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="StatusPill" Property="Opacity" Value="0.8"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
+                                <Style.Triggers>
+                                    <Trigger Property="IsChecked" Value="True">
+                                        <Setter Property="Content" Value="已启用"/>
+                                        <Setter Property="Background" Value="{StaticResource SuccessLight}"/>
+                                        <Setter Property="Foreground" Value="{StaticResource Success}"/>
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </ListView.Resources>
                         <ListView.View>
                             <GridView>
-                                <GridViewColumn Width="56">
-                                    <GridViewColumn.Header>
-                                        <TextBlock Text="启用" HorizontalAlignment="Center"/>
-                                    </GridViewColumn.Header>
+                                <GridViewColumn Header="状态" Width="84">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
-                                            <CheckBox IsChecked="{Binding Enabled, Mode=TwoWay}" HorizontalAlignment="Center"/>
+                                            <ToggleButton IsChecked="{Binding Enabled, Mode=TwoWay}"
+                                                          Style="{StaticResource AppStatusButton}"/>
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
-                                <GridViewColumn Header="程序" Width="220">
+                                <GridViewColumn Header="程序" Width="210">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
                                             <StackPanel Orientation="Horizontal">
@@ -102,7 +137,15 @@
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
-                                <GridViewColumn Header="路径" Width="420">
+                                <GridViewColumn Header="操作" Width="72">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <Button Content="移除" Style="{StaticResource DangerButton}" Padding="8,4"
+                                                    MinHeight="28" Click="RemoveApp_Click" ToolTip="移除此程序，保存后生效。"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="路径" Width="300">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
                                             <TextBlock Text="{Binding FullPath}" Foreground="{StaticResource TextMuted}"

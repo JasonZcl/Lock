@@ -282,6 +282,12 @@ public partial class MainWindow : Window
         SetDirty(true);
     }
 
+    private void RemoveApp_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        if (sender is FrameworkElement { DataContext: Row row } && _rows.Remove(row))
+            SetDirty(true);
+    }
+
     // ---- 文件夹锁 ----
 
     public sealed class FolderRow
