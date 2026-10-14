@@ -62,7 +62,23 @@ public sealed class PipeServer
 
     private static NamedPipeServerStream CreatePipe(bool firstInstance)
     {
+        using var identity = WindowsIdentity.GetCurrent();
+        var security = CreateSecurity(identity.User ?? throw new UnauthorizedAccessException("无法获取服务进程身份"));
+        return NamedPipeServerStreamAcl.Create(
+            Protocol.PipeName,
+            PipeDirection.InOut,
+            NamedPipeServerStream.MaxAllowedServerInstances,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous | (firstInstance ? PipeOptions.FirstPipeInstance : PipeOptions.None),
+            inBufferSize: 0,
+            outBufferSize: 0,
+            security);
+    }
+
+    private static PipeSecurity CreateSecurity(SecurityIdentifier owner)
+    {
         var security = new PipeSecurity();
+        security.SetOwner(owner);
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         security.AddAccessRule(new PipeAccessRule(
             new SecurityIdentifier(WellKnownSidType.NetworkSid, null),
@@ -78,21 +94,8 @@ public sealed class PipeServer
             new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
             PipeAccessRights.FullControl, AccessControlType.Allow));
         // 创建后续实例需要 CreateNewInstance 权限；前台调试（非 SYSTEM）运行时也要能建第二个实例
-        using (var me = WindowsIdentity.GetCurrent())
-        {
-            if (me.User != null)
-                security.AddAccessRule(new PipeAccessRule(me.User, PipeAccessRights.FullControl, AccessControlType.Allow));
-        }
-
-        return NamedPipeServerStreamAcl.Create(
-            Protocol.PipeName,
-            PipeDirection.InOut,
-            NamedPipeServerStream.MaxAllowedServerInstances,
-            PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous | (firstInstance ? PipeOptions.FirstPipeInstance : PipeOptions.None),
-            inBufferSize: 0,
-            outBufferSize: 0,
-            security);
+        security.AddAccessRule(new PipeAccessRule(owner, PipeAccessRights.FullControl, AccessControlType.Allow));
+        return security;
     }
 
     private async Task ServeAsync(NamedPipeServerStream pipe, CancellationToken ct)

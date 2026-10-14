@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.IO.Pipes;
 using System.Reflection;
 using System.Security.AccessControl;
@@ -11,6 +12,18 @@ using Lock.Core.Models;
 using Lock.Core.Native;
 using Lock.Core.Services;
 using Lock.Service;
+using Lock.Services;
+using System.Windows.Threading;
+
+if (args.Length == 4 && args[0] == "--scm-probe")
+{
+    var lookup = typeof(NativeMethods).Assembly.GetType("Lock.Core.Native.ServiceIdentity")!.GetMethod("Matches")!;
+    object?[] parameters = [args[1], uint.Parse(args[2]), args[3], null];
+    var matches = (bool)lookup.Invoke(null, parameters)!;
+    Console.WriteLine($"Read-only SCM verification: {matches}; {parameters[3]}");
+    Environment.ExitCode = matches ? 0 : 1;
+    return;
+}
 
 if (args.Contains("--child")) { Thread.Sleep(30000); return; }
 if (args.Contains("--launcher"))
@@ -282,7 +295,8 @@ try
         var hub = new AgentHub();
         hub.Add(session);
         Check(!AgentHub.IsGenuine(session) && hub.Find(session.SessionId) == null, "impostor tray client never selected");
-        Check(!PipeTrust.IsTrustedServer(clientPipe, Path.Combine(AppContext.BaseDirectory, "SysGuardSvc.exe")), "fake server rejected before handshake");
+        Check(!PipeTrust.IsTrustedServer(clientPipe, Path.Combine(AppContext.BaseDirectory, "SysGuardSvc.exe"), out var trustError), "fake server rejected before handshake");
+        Check(!string.IsNullOrWhiteSpace(trustError), "server identity rejection includes diagnostic reason");
         if (Environment.UserInteractive)
         {
             Environment.SetEnvironmentVariable("APPLOCK_ALLOW_DEBUG_CLIENTS", "1");
@@ -311,6 +325,26 @@ try
     }
 
     var createPipe = typeof(PipeServer).GetMethod("CreatePipe", BindingFlags.NonPublic | BindingFlags.Static)!;
+    var createSecurity = typeof(PipeServer).GetMethod("CreateSecurity", BindingFlags.NonPublic | BindingFlags.Static)!;
+    var systemOwner = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+    var systemSecurity = (PipeSecurity)createSecurity.Invoke(null, [systemOwner])!;
+    Check(systemSecurity.GetOwner(typeof(SecurityIdentifier))!.Equals(systemOwner), "SYSTEM pipe owner is explicit rather than token default");
+    var serviceIdentity = typeof(NativeMethods).Assembly.GetType("Lock.Core.Native.ServiceIdentity")!;
+    var matchesBinary = serviceIdentity.GetMethod("MatchesBinaryPath")!;
+    var expectedServicePath = Path.Combine(root, "installed", "SysGuardSvc.exe");
+    Check((bool)matchesBinary.Invoke(null, ["\"" + expectedServicePath + "\"", expectedServicePath])!, "quoted SCM binary path matches expected service");
+    Check((bool)matchesBinary.Invoke(null, [expectedServicePath.ToUpperInvariant(), expectedServicePath])!, "SCM binary path comparison is case insensitive");
+    Check(!(bool)matchesBinary.Invoke(null, ["\"" + expectedServicePath + "\" run", expectedServicePath])!, "SCM binary path rejects unexpected command arguments");
+    Check(!(bool)matchesBinary.Invoke(null, [Path.Combine(root, "impostor.exe"), expectedServicePath])!, "SCM binary path rejects another executable");
+    try
+    {
+        serviceIdentity.GetMethod("Matches")!.Invoke(null, ["AppLock.Absent." + Guid.NewGuid().ToString("N"), (uint)Environment.ProcessId, expectedServicePath, null]);
+        Check(false, "SCM identity lookup must reject nonexistent service");
+    }
+    catch (TargetInvocationException exception) when (exception.InnerException is System.ComponentModel.Win32Exception native && native.NativeErrorCode == 1060)
+    {
+        Check(true, "SCM lookup works without elevation and rejects nonexistent service");
+    }
     using (var reserved = (NamedPipeServerStream)createPipe.Invoke(null, [true])!)
     {
         Reject<TargetInvocationException>(() => createPipe.Invoke(null, [true]), "first pipe instance prevents name squatting");
@@ -333,6 +367,43 @@ try
     }
 
     var scope = typeof(LockEngine).GetMethod("ScopeKey", BindingFlags.NonPublic | BindingFlags.Static)!;
+    if (Environment.UserInteractive)
+    {
+        Environment.SetEnvironmentVariable("APPLOCK_ALLOW_DEBUG_CLIENTS", "1");
+        try
+        {
+            using var positiveAgents = new AgentHubFixture(manager);
+            using var positiveClient = new ServiceClient(Dispatcher.CurrentDispatcher);
+            var positiveServer = positiveAgents.Server.RunAsync(positiveAgents.Cancellation.Token);
+            positiveClient.Start();
+            var connectDeadline = DateTime.UtcNow.AddSeconds(5);
+            while (!positiveClient.IsConnected && DateTime.UtcNow < connectDeadline) await Task.Delay(50);
+            Check(positiveClient.IsConnected, "real tray ServiceClient completes hello handshake: " + positiveClient.ConnectionError);
+            Check(positiveClient.Hello?.HasPassword == true && positiveClient.ConnectionError == null, "tray handshake publishes status and clears errors");
+            Check((await positiveClient.LoginAsync("test1234")).Ok, "real tray ServiceClient logs in");
+            Check((await positiveClient.GetSettingsAsync()).Ok, "real tray ServiceClient sends authenticated settings request");
+            positiveAgents.Cancellation.Cancel();
+            await RejectAsync<OperationCanceledException>(() => positiveServer, "positive pipe server stops cleanly");
+            var disconnectDeadline = DateTime.UtcNow.AddSeconds(5);
+            while (positiveClient.IsConnected && DateTime.UtcNow < disconnectDeadline) await Task.Delay(50);
+            Check(!positiveClient.IsConnected && positiveClient.Token == null, "tray disconnect clears connection-bound token");
+            using var restart = new AgentHubFixture(manager);
+            var restartedServer = restart.Server.RunAsync(restart.Cancellation.Token);
+            var reconnectDeadline = DateTime.UtcNow.AddSeconds(7);
+            while (!positiveClient.IsConnected && DateTime.UtcNow < reconnectDeadline) await Task.Delay(50);
+            Check(positiveClient.IsConnected && positiveClient.Token == null, "real tray ServiceClient reconnects without reusing old token");
+            Check((await positiveClient.LoginAsync("test1234")).Ok && (await positiveClient.GetSettingsAsync()).Ok,
+                "real tray ServiceClient can authenticate again after restart");
+            restart.Cancellation.Cancel();
+            await RejectAsync<OperationCanceledException>(() => restartedServer, "restarted positive pipe server stops cleanly");
+        }
+        finally { Environment.SetEnvironmentVariable("APPLOCK_ALLOW_DEBUG_CLIENTS", null); }
+    }
+    else
+    {
+        skipped++;
+        Console.WriteLine("SKIP isolated foreground tray client integration requires interactive debug mode");
+    }
     Check((string)scope.Invoke(null, ["app", 1u])! != (string)scope.Invoke(null, ["app", 2u])!, "grace state isolated by terminal session");
     var processSettings = manager.GetSettings();
     processSettings.LockedApps = [new LockedApp { ExeName = Path.GetFileName(Environment.ProcessPath!).ToLowerInvariant(), FullPath = Environment.ProcessPath! }];
@@ -390,4 +461,28 @@ catch (Exception exception)
     Console.Error.WriteLine(exception);
     Console.Error.WriteLine("Isolated fixtures preserved: " + root);
     Environment.ExitCode = 1;
+}
+
+sealed class AgentHubFixture : IDisposable
+{
+    private readonly LockEngine _engine;
+    private readonly FolderManager _folders;
+    public CancellationTokenSource Cancellation { get; } = new(TimeSpan.FromSeconds(25));
+    public PipeServer Server { get; }
+
+    public AgentHubFixture(ConfigManager manager)
+    {
+        var agents = new AgentHub();
+        _engine = new LockEngine(manager, agents);
+        _folders = new FolderManager(manager, agents);
+        Server = new PipeServer(manager, agents, _engine, _folders);
+    }
+
+    public void Dispose()
+    {
+        Cancellation.Cancel();
+        _folders.Dispose();
+        _engine.Dispose();
+        Cancellation.Dispose();
+    }
 }

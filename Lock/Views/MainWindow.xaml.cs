@@ -79,6 +79,7 @@ public partial class MainWindow : Window
 
         _client.Connected += OnConnectionChanged;
         _client.Disconnected += OnConnectionChanged;
+        _client.ConnectionErrorChanged += RefreshConnectionError;
         _client.SettingsChanged += () => _ = LoadSettingsAsync();
         _client.FoldersChanged += () => _ = LoadFoldersAsync();
 
@@ -477,6 +478,7 @@ public partial class MainWindow : Window
         ServiceStateText.Foreground = running ? Res("Success") : Res("Danger");
         ConnStateText.Text = _client.IsConnected ? "已连接" : "未连接";
         ConnStateText.Foreground = _client.IsConnected ? Res("Success") : Res("Danger");
+        RefreshConnectionError();
 
         // 顶部状态胶囊
         ServicePillText.Text = "服务 · " + stateText;
@@ -492,6 +494,12 @@ public partial class MainWindow : Window
     }
 
     private Brush Res(string key) => (Brush)FindResource(key);
+
+    private void RefreshConnectionError()
+    {
+        ConnectionErrorText.Text = _client.ConnectionError ?? "";
+        ConnectionErrorText.Visibility = _client.ConnectionError == null ? Visibility.Collapsed : Visibility.Visible;
+    }
 
     private void RefreshService_Click(object sender, RoutedEventArgs e) => RefreshServicePanel();
 

@@ -372,6 +372,7 @@
                                     <TextBlock Grid.Column="2" Text="连接状态" Style="{StaticResource Muted}" VerticalAlignment="Center"/>
                                     <TextBlock x:Name="ConnStateText" Grid.Column="3" FontWeight="SemiBold" VerticalAlignment="Center" Margin="12,0,0,0"/>
                                 </Grid>
+                                <TextBlock x:Name="ConnectionErrorText" Foreground="{StaticResource Danger}" TextWrapping="Wrap" Margin="0,0,0,12" Visibility="Collapsed"/>
                                 <StackPanel Orientation="Horizontal">
                                     <Button x:Name="InstallButton" Content="安装并启动服务" Style="{StaticResource PrimaryButton}" Margin="0,0,8,0" Click="Install_Click"/>
                                     <Button x:Name="UninstallButton" Content="停止并卸载服务" Style="{StaticResource DangerButton}" Margin="0,0,8,0" Click="Uninstall_Click"/>

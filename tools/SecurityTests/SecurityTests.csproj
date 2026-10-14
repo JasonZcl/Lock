@@ -2,9 +2,11 @@
     <PropertyGroup>
         <OutputType>Exe</OutputType>
         <AssemblyName>AppLock.SecurityTests</AssemblyName>
+        <UseWPF>true</UseWPF>
         <OutDir>$(MSBuildThisFileDirectory)bin\$(Configuration)\</OutDir>
     </PropertyGroup>
     <ItemGroup>
         <ProjectReference Include="..\..\Lock.Service\Lock.Service.csproj" />
+        <ProjectReference Include="..\..\Lock\Lock.csproj" />
     </ItemGroup>
 </Project>

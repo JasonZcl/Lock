@@ -31,6 +31,8 @@ public sealed class ServiceClient : IDisposable
 
     public bool IsConnected { get; private set; }
     public HelloData? Hello { get; private set; }
+    public string? ConnectionError { get; private set; }
+    public event Action? ConnectionErrorChanged;
 
     /// <summary>管理登录后拿到的 token；未登录为 null。</summary>
     public string? Token { get; private set; }
@@ -60,8 +62,8 @@ public sealed class ServiceClient : IDisposable
                 pipe = new NamedPipeClientStream(".", Protocol.PipeName, PipeDirection.InOut,
                     PipeOptions.Asynchronous, TokenImpersonationLevel.Identification);
                 await pipe.ConnectAsync(1000, ct).ConfigureAwait(false);
-                if (!PipeTrust.IsTrustedServer(pipe, Path.Combine(AppContext.BaseDirectory, "SysGuardSvc.exe")))
-                    throw new IOException("管道服务端身份验证失败");
+                if (!PipeTrust.IsTrustedServer(pipe, Path.Combine(AppContext.BaseDirectory, "SysGuardSvc.exe"), out var trustError))
+                    throw new IOException("管道服务端身份验证失败：" + trustError);
 
                 var channel = new JsonLineChannel(pipe);
                 lock (_sync) _channel = channel;
@@ -75,6 +77,7 @@ public sealed class ServiceClient : IDisposable
 
                 Hello = hello.Data;
                 IsConnected = true;
+                SetConnectionError(null);
                 Raise(Connected);
 
                 await readTask.ConfigureAwait(false);
@@ -83,8 +86,9 @@ public sealed class ServiceClient : IDisposable
             {
                 break;
             }
-            catch (Exception)
+            catch (Exception exception)
             {
+                SetConnectionError(exception.Message);
                 // 服务未运行或连接中断，稍后重试
             }
             finally
@@ -148,6 +152,13 @@ public sealed class ServiceClient : IDisposable
     {
         if (action == null) return;
         _dispatcher.BeginInvoke(action);
+    }
+
+    private void SetConnectionError(string? error)
+    {
+        if (ConnectionError == error) return;
+        ConnectionError = error;
+        Raise(ConnectionErrorChanged);
     }
 
     private void FailAllInflight(string reason)
