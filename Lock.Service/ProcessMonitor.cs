@@ -8,7 +8,7 @@ namespace Lock.Service;
 /// </summary>
 public sealed class ProcessMonitor : IDisposable
 {
-    public sealed record ProcessInfo(uint Pid, string ExeName, string? FullPath);
+    public sealed record ProcessInfo(uint Pid, string ExeName, string? FullPath, long? CreatedAt = null);
 
     private readonly TimeSpan _interval;
     private readonly CancellationTokenSource _cts = new();
@@ -37,13 +37,14 @@ public sealed class ProcessMonitor : IDisposable
     private void Loop()
     {
         var buffer = new uint[1024];
-        var known = new HashSet<uint>();
+        var known = new Dictionary<uint, long>();
 
         // 首次快照：已在运行的进程视为已知，不做拦截
         var count = NativeMethods.EnumProcessIds(ref buffer);
-        for (var i = 0; i < count; i++) known.Add(buffer[i]);
+        for (var index = 0; index < count; index++)
+            if (NativeMethods.GetProcessCreationTime(buffer[index]) is { } created) known[buffer[index]] = created;
 
-        var current = new HashSet<uint>();
+        var current = new Dictionary<uint, long>();
         var token = _cts.Token;
 
         while (!token.IsCancellationRequested)
@@ -52,13 +53,14 @@ public sealed class ProcessMonitor : IDisposable
             {
                 count = NativeMethods.EnumProcessIds(ref buffer);
                 current.Clear();
-                for (var i = 0; i < count; i++) current.Add(buffer[i]);
+                for (var index = 0; index < count; index++)
+                    if (NativeMethods.GetProcessCreationTime(buffer[index]) is { } created) current[buffer[index]] = created;
 
-                foreach (var pid in current)
+                foreach (var (pid, created) in current)
                 {
-                    if (pid == 0 || known.Contains(pid)) continue;
+                    if (pid == 0 || (known.TryGetValue(pid, out var previous) && previous == created)) continue;
 
-                    var info = Resolve(pid);
+                    var info = Resolve(pid, created);
                     if (info != null)
                     {
                         try { ProcessStarted?.Invoke(info); }
@@ -68,7 +70,7 @@ public sealed class ProcessMonitor : IDisposable
 
                 // 用当前快照替换已知集合，PID 被复用时也能重新识别
                 known.Clear();
-                known.UnionWith(current);
+                foreach (var entry in current) known[entry.Key] = entry.Value;
             }
             catch (Exception ex)
             {
@@ -79,7 +81,7 @@ public sealed class ProcessMonitor : IDisposable
         }
     }
 
-    private static ProcessInfo? Resolve(uint pid)
+    private static ProcessInfo? Resolve(uint pid, long created)
     {
         var path = NativeMethods.GetProcessImagePath(pid);
         string? exe = null;
@@ -101,13 +103,12 @@ public sealed class ProcessMonitor : IDisposable
             }
         }
 
-        return string.IsNullOrEmpty(exe) ? null : new ProcessInfo(pid, exe.ToLowerInvariant(), path);
+        return string.IsNullOrEmpty(exe) ? null : new ProcessInfo(pid, exe.ToLowerInvariant(), path, created);
     }
 
     public void Dispose()
     {
         _cts.Cancel();
-        _thread?.Join(TimeSpan.FromSeconds(2));
-        _cts.Dispose();
+        if (_thread == null || _thread.Join(TimeSpan.FromSeconds(2))) _cts.Dispose();
     }
 }

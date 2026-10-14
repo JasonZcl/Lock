@@ -92,10 +92,6 @@ Filename: "{app}\{#ServiceExe}"; Parameters: "install ""{app}\{#AgentExe}"""; St
 ; 安装完成页勾选后启动托盘（以普通用户身份，而不是安装程序的管理员身份）
 Filename: "{app}\{#AgentExe}"; Description: "{cm:LaunchNow}"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
-[UninstallRun]
-; 先让服务自己收尾：停服务、删计划任务/右键菜单、恢复所有被锁文件夹权限
-Filename: "{app}\{#ServiceExe}"; Parameters: "uninstall"; RunOnceId: "svc-uninstall"; Flags: runhidden waituntilterminated
-
 [Code]
 const
   DotNetDownloadUrl = 'https://dotnet.microsoft.com/download/dotnet/10.0';
@@ -209,8 +205,19 @@ function InitializeUninstall: Boolean;
 var
   ResultCode: Integer;
 begin
-  Result := True;
+  Result := False;
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#AgentExe} /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if not Exec(ExpandConstant('{app}\{#ServiceExe}'), 'uninstall', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    MsgBox(CustomMessage('FoldersRestoreFailed'), mbError, MB_OK);
+    Exit;
+  end;
+  if ResultCode <> 0 then
+  begin
+    MsgBox(CustomMessage('FoldersRestoreFailed'), mbError, MB_OK);
+    Exit;
+  end;
+  Result := True;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

@@ -29,6 +29,13 @@ public static partial class NativeMethods
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint serverProcessId);
+
+    public static uint? GetPipeServerProcessId(SafePipeHandle pipe)
+        => GetNamedPipeServerProcessId(pipe, out var pid) ? pid : null;
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool GetProcessTimes(SafeProcessHandle hProcess, out long lpCreationTime, out long lpExitTime, out long lpKernelTime, out long lpUserTime);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -209,17 +216,31 @@ public static partial class NativeMethods
         => GetNamedPipeClientProcessId(handle, out var pid) ? pid : null;
 
     /// <summary>挂起整个进程。返回 true 表示成功。</summary>
-    public static bool SuspendProcess(uint pid)
+    public static bool SuspendProcess(uint pid, long? expectedCreation = null)
     {
-        using var h = OpenProcess(PROCESS_SUSPEND_RESUME, false, pid);
-        return !h.IsInvalid && NtSuspendProcess(h) == 0;
+        using var h = OpenProcess(PROCESS_SUSPEND_RESUME | PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        return !h.IsInvalid && (!expectedCreation.HasValue || (GetProcessTimes(h, out var created, out _, out _, out _) && created == expectedCreation))
+            && NtSuspendProcess(h) == 0;
     }
 
     /// <summary>恢复整个进程。返回 true 表示成功。</summary>
-    public static bool ResumeProcess(uint pid)
+    public static bool ResumeProcess(uint pid, long? expectedCreation = null)
     {
-        using var h = OpenProcess(PROCESS_SUSPEND_RESUME, false, pid);
-        return !h.IsInvalid && NtResumeProcess(h) == 0;
+        using var h = OpenProcess(PROCESS_SUSPEND_RESUME | PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        return !h.IsInvalid && (!expectedCreation.HasValue || (GetProcessTimes(h, out var created, out _, out _, out _) && created == expectedCreation))
+            && NtResumeProcess(h) == 0;
+    }
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool TerminateProcess(SafeProcessHandle process, uint exitCode);
+
+    public static bool TerminateIfSame(uint pid, long? expectedCreation)
+    {
+        using var handle = OpenProcess(0x0001 | PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        return !handle.IsInvalid && expectedCreation.HasValue
+            && GetProcessTimes(handle, out var created, out _, out _, out _) && created == expectedCreation
+            && TerminateProcess(handle, 1);
     }
 
     /// <summary>强制把窗口拉到前台（绕过 Windows 对 SetForegroundWindow 的限制）。</summary>

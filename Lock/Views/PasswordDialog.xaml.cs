@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Interop;
 using Lock.Core.Native;
+using Lock.Core.Services;
 
 namespace Lock.Views;
 
@@ -9,7 +10,7 @@ namespace Lock.Views;
 /// </summary>
 public partial class PasswordDialog : Window
 {
-    private const int MinLength = 4;
+    private const int MinLength = PasswordHasher.MinPasswordLength;
 
     /// <summary>校验回调：返回 null 表示通过，否则返回错误信息。</summary>
     private readonly Func<string, Task<string?>>? _verify;
@@ -64,9 +65,9 @@ public partial class PasswordDialog : Window
 
         if (_setMode)
         {
-            if (p1.Length < MinLength)
+            if (PasswordHasher.NewPasswordError(p1) is { } passwordError)
             {
-                ShowError($"密码长度至少 {MinLength} 位");
+                ShowError(passwordError);
                 return;
             }
             if (p1 != Password2.Password)

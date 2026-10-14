@@ -60,6 +60,8 @@ public sealed class ServiceClient : IDisposable
                 pipe = new NamedPipeClientStream(".", Protocol.PipeName, PipeDirection.InOut,
                     PipeOptions.Asynchronous, TokenImpersonationLevel.Identification);
                 await pipe.ConnectAsync(1000, ct).ConfigureAwait(false);
+                if (!PipeTrust.IsTrustedServer(pipe, Path.Combine(AppContext.BaseDirectory, "SysGuardSvc.exe")))
+                    throw new IOException("管道服务端身份验证失败");
 
                 var channel = new JsonLineChannel(pipe);
                 lock (_sync) _channel = channel;
@@ -69,6 +71,7 @@ public sealed class ServiceClient : IDisposable
 
                 var hello = await RequestAsync<HelloData>(Protocol.Hello, null, ct).ConfigureAwait(false);
                 if (!hello.Ok || hello.Data == null) throw new IOException("握手失败：" + hello.Error);
+                if (hello.Data.Version != Protocol.Version) throw new IOException("管道协议版本不兼容");
 
                 Hello = hello.Data;
                 IsConnected = true;
@@ -174,10 +177,14 @@ public sealed class ServiceClient : IDisposable
         var request = new JsonObject { ["id"] = id, ["type"] = type };
         if (withToken) request["token"] = Token;
         if (data != null) request["data"] = JsonLineChannel.ToNode(data);
+        var duration = type is Protocol.FolderAdd or Protocol.FolderLock or Protocol.FolderUnlock or Protocol.FolderRemove
+            ? TimeSpan.FromMinutes(5) : RequestTimeout;
+        using var timeout = new CancellationTokenSource(duration);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token, _cts.Token);
 
         try
         {
-            await channel.SendAsync(request, ct).ConfigureAwait(false);
+            await channel.SendAsync(request, linked.Token).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -185,8 +192,6 @@ public sealed class ServiceClient : IDisposable
             return ApiResult<T>.Fail("发送失败：" + ex.Message, "disconnected");
         }
 
-        using var timeout = new CancellationTokenSource(RequestTimeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token, _cts.Token);
         JsonObject response;
         try
         {

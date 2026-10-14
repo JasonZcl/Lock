@@ -1,4 +1,5 @@
 using Lock.Core.Native;
+using Lock.Core.Ipc;
 
 namespace Lock.Service;
 
@@ -12,7 +13,7 @@ public sealed class AgentHub
 
     /// <summary>正版托盘程序的路径：与服务同目录的 AppLock.exe。</summary>
     private static readonly string ExpectedAgentPath =
-        Path.Combine(Path.GetDirectoryName(Environment.ProcessPath!) ?? "", "AppLock.exe");
+        Path.Combine(AppContext.BaseDirectory, "AppLock.exe");
 
     public event Action<ClientSession>? Disconnected;
 
@@ -29,9 +30,7 @@ public sealed class AgentHub
     }
 
     /// <summary>
-    /// 找到指定会话中的托盘程序。优先返回可执行文件是正版 AppLock.exe 的客户端，
-    /// 防止同会话里别的程序连上管道后截走解锁请求（它拿不到密码，但能让被锁程序一直卡住）。
-    /// 找不到正版时退回任意客户端，方便前台调试。
+    /// 找到指定会话中的正版托盘程序；仅显式开启的独立调试管道允许测试客户端。
     /// </summary>
     public ClientSession? Find(uint sessionId)
     {
@@ -45,13 +44,14 @@ public sealed class AgentHub
                 if (IsGenuine(c)) return c;
                 fallback ??= c;
             }
-            return fallback;
+            return Protocol.AllowDebugClients ? fallback : null;
         }
     }
 
     public static bool IsGenuine(ClientSession c)
     {
         if (c.ProcessId is not { } pid) return false;
+        if (c.ProcessCreatedAt == null || NativeMethods.GetProcessCreationTime(pid) != c.ProcessCreatedAt) return false;
         var path = NativeMethods.GetProcessImagePath(pid);
         return path != null && string.Equals(path, ExpectedAgentPath, StringComparison.OrdinalIgnoreCase);
     }

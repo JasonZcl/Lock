@@ -12,6 +12,7 @@ public sealed class LockWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!Lock.Core.Ipc.Protocol.AllowDebugClients) Lock.Core.Services.ConfigStore.EnsureSecuredDirectory();
         ServiceLog.Info("服务启动");
 
         _config = new ConfigManager();

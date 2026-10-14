@@ -20,11 +20,12 @@ public static class ServiceLog
             try
             {
                 Directory.CreateDirectory(ConfigStore.DataDirectory);
+                using var guard = PathGuard.Pin(ConfigStore.DataDirectory);
                 var fi = new FileInfo(ConfigStore.ServiceLogPath);
                 if (fi.Exists && fi.Length > MaxBytes)
                     File.Move(ConfigStore.ServiceLogPath, ConfigStore.ServiceLogPath + ".1", overwrite: true);
 
-                File.AppendAllText(ConfigStore.ServiceLogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{level}] {message}{Environment.NewLine}");
+                ConfigStore.AppendLog(ConfigStore.ServiceLogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{level}] {message}{Environment.NewLine}");
             }
             catch
             {

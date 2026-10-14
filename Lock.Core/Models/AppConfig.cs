@@ -32,11 +32,20 @@ public sealed class LockedFolder
 
     /// <summary>锁定前的安全描述符（SDDL：所有者 + 组 + DACL），解锁时据此恢复。</summary>
     public string? OriginalSddl { get; set; }
+    public List<FolderAclEntry> AclEntries { get; set; } = [];
+    public bool LockPending { get; set; }
 
     public bool Locked { get; set; }
 
     /// <summary>最近一次解锁时间（UTC），用于自动重新锁定。</summary>
     public DateTime? UnlockedAtUtc { get; set; }
+}
+
+public sealed class FolderAclEntry
+{
+    public string RelativePath { get; set; } = "";
+    public string Identity { get; set; } = "";
+    public string Sddl { get; set; } = "";
 }
 
 /// <summary>PBKDF2 哈希后的密钥记录。</summary>

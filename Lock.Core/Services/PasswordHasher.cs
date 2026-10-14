@@ -9,12 +9,18 @@ namespace Lock.Core.Services;
 /// </summary>
 public static class PasswordHasher
 {
+    public const int MinPasswordLength = 8;
+    public const int MaxSecretLength = 256;
+    public static string? NewPasswordError(string? password)
+        => password == null || password.Length < MinPasswordLength || password.Length > MaxSecretLength
+            ? $"密码长度必须为 {MinPasswordLength}–{MaxSecretLength} 位" : null;
     private const int SaltSize = 16;
     private const int HashSize = 32;
-    private const int DefaultIterations = 100_000;
+    private const int DefaultIterations = 600_000;
 
     public static SecretRecord Create(string secret)
     {
+        if (secret == null || secret.Length > MaxSecretLength) throw new ArgumentException("密钥过长");
         var salt = RandomNumberGenerator.GetBytes(SaltSize);
         var hash = Rfc2898DeriveBytes.Pbkdf2(secret, salt, DefaultIterations, HashAlgorithmName.SHA256, HashSize);
 
@@ -28,16 +34,18 @@ public static class PasswordHasher
 
     public static bool Verify(SecretRecord? record, string secret)
     {
-        if (record == null || record.Iterations <= 0) return false;
+        if (record == null || record.Iterations < 10_000 || record.Iterations > 10_000_000
+            || secret == null || secret.Length > MaxSecretLength) return false;
 
         try
         {
             var salt = Convert.FromBase64String(record.Salt);
             var expected = Convert.FromBase64String(record.Hash);
+            if (salt.Length != SaltSize || expected.Length != HashSize) return false;
             var actual = Rfc2898DeriveBytes.Pbkdf2(secret, salt, record.Iterations, HashAlgorithmName.SHA256, expected.Length);
             return CryptographicOperations.FixedTimeEquals(actual, expected);
         }
-        catch (FormatException)
+        catch (Exception exception) when (exception is FormatException or ArgumentException)
         {
             return false;
         }

@@ -1,160 +1,125 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
+using Lock.Core.Models;
 using Lock.Core.Native;
+using Microsoft.Win32;
+using FileSecurity = Lock.Core.Native.FileSecurity;
 
 namespace Lock.Core.Services;
 
-/// <summary>
-/// 用 NTFS 权限锁定/恢复文件夹。必须以 SYSTEM（或至少具备 SeRestorePrivilege 的管理员）运行。
-///
-/// 锁定 = 所有者改为 SYSTEM、DACL 改为“仅 SYSTEM 完全控制”并禁用继承，Windows 会把新的可继承 ACE
-/// 传播到整个子树（替换子项原本的继承项）。所有者改掉是关键：所有者天然拥有 READ_CONTROL/WRITE_DAC，
-/// 不改所有者的话用户在“属性 → 安全”里就能把权限改回来。
-///
-/// 解锁 = 恢复原所有者，DACL 恢复为原始的显式 ACE 并重新启用继承，继承项由父目录自动补回。
-/// </summary>
 public static class FolderLocker
 {
-    // 仅 SYSTEM 完全控制，禁用继承，可继承到子文件夹与文件
-    private const string LockedSddl = "O:SYG:SYD:PAI(A;OICI;FA;;;SY)";
-
     private static readonly SecurityIdentifier SystemSid = new(WellKnownSidType.LocalSystemSid, null);
-    private static readonly SecurityIdentifier AdminsSid = new(WellKnownSidType.BuiltinAdministratorsSid, null);
-
+    private static readonly object PrivilegeSync = new();
     private static bool _privilegesEnabled;
 
-    /// <summary>启用改所有者 / 读写任意 ACL 所需的特权。返回 false 表示当前进程没有这些特权（非 SYSTEM / 非管理员）。</summary>
     public static bool EnsurePrivileges()
     {
-        if (_privilegesEnabled) return true;
-        var restore = NativeMethods.EnablePrivilege("SeRestorePrivilege");
-        var backup = NativeMethods.EnablePrivilege("SeBackupPrivilege");
-        NativeMethods.EnablePrivilege("SeTakeOwnershipPrivilege");
-        NativeMethods.EnablePrivilege("SeSecurityPrivilege");
-        _privilegesEnabled = restore && backup;
-        return _privilegesEnabled;
+        lock (PrivilegeSync)
+        {
+            if (_privilegesEnabled) return true;
+            var restore = NativeMethods.EnablePrivilege("SeRestorePrivilege");
+            var backup = NativeMethods.EnablePrivilege("SeBackupPrivilege");
+            NativeMethods.EnablePrivilege("SeTakeOwnershipPrivilege");
+            _privilegesEnabled = restore && backup;
+            return _privilegesEnabled;
+        }
     }
 
-    /// <summary>规范化路径：绝对路径、去结尾分隔符。</summary>
     public static string Normalize(string path)
-        => Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)
+            || path.Length < 3 || !char.IsAsciiLetter(path[0]) || path[1] != ':' || path[2] != '\\')
+            throw new ArgumentException("仅支持本地磁盘的绝对路径");
+        foreach (var component in path[3..].Replace('/', '\\').Split('\\', StringSplitOptions.RemoveEmptyEntries))
+            if (component.Contains(':') || component.EndsWith('.') || component.EndsWith(' '))
+                throw new ArgumentException("不允许设备路径、数据流或含尾随空格/点的路径");
+        var normalized = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        foreach (var component in normalized[3..].Split('\\', StringSplitOptions.RemoveEmptyEntries))
+            if (component.Contains(':') || component.EndsWith('.') || component.EndsWith(' '))
+                throw new ArgumentException("不允许设备路径、数据流或含尾随空格/点的路径");
+        return normalized;
+    }
 
-    /// <summary>
-    /// 检查该文件夹能否被锁。返回 null 表示可以，否则返回原因。
-    /// 系统目录、用户配置文件根、磁盘根、应用锁自身目录一律拒绝——锁错了会让系统或应用锁自己无法工作。
-    /// </summary>
     public static string? WhyForbidden(string path)
     {
-        path = Normalize(path);
-        if (!Directory.Exists(path)) return "文件夹不存在";
-        if (Path.GetPathRoot(path)?.TrimEnd('\\') == path) return "不能锁定整个磁盘";
-
-        var drive = new DriveInfo(Path.GetPathRoot(path)!);
-        if (!string.Equals(drive.DriveFormat, "NTFS", StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(drive.DriveFormat, "ReFS", StringComparison.OrdinalIgnoreCase))
-            return $"该磁盘是 {drive.DriveFormat} 格式，不支持权限控制（仅 NTFS/ReFS 可用）";
-
-        string Dir(Environment.SpecialFolder f) => Normalize(Environment.GetFolderPath(f));
-
-        var forbiddenTrees = new[]
+        try
         {
-            Dir(Environment.SpecialFolder.Windows),
-            Dir(Environment.SpecialFolder.ProgramFiles),
-            Dir(Environment.SpecialFolder.ProgramFilesX86),
-            Dir(Environment.SpecialFolder.CommonApplicationData),
-            Normalize(ConfigStore.DataDirectory),
-            Normalize(Path.GetDirectoryName(Environment.ProcessPath!)!),
-        };
-        foreach (var t in forbiddenTrees)
-        {
-            if (t.Length > 0 && (IsSameOrUnder(path, t) || IsSameOrUnder(t, path)))
+            path = Normalize(path);
+            if (!Directory.Exists(path)) return "文件夹不存在";
+            using var guard = PathGuard.Pin(path);
+            if (string.Equals(Path.GetPathRoot(path), path, StringComparison.OrdinalIgnoreCase)) return "不能锁定整个磁盘";
+            var drive = new DriveInfo(Path.GetPathRoot(path)!);
+            if (!string.Equals(drive.DriveFormat, "NTFS", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(drive.DriveFormat, "ReFS", StringComparison.OrdinalIgnoreCase))
+                return "仅支持 NTFS/ReFS 本地磁盘";
+            var forbidden = new List<string>();
+            foreach (var folder in new[] { Environment.SpecialFolder.Windows, Environment.SpecialFolder.ProgramFiles,
+                Environment.SpecialFolder.ProgramFilesX86, Environment.SpecialFolder.CommonApplicationData })
+            {
+                var directory = Environment.GetFolderPath(folder);
+                if (!string.IsNullOrWhiteSpace(directory)) forbidden.Add(Normalize(directory));
+            }
+            forbidden.Add(Normalize(ConfigStore.DataDirectory));
+            forbidden.Add(Normalize(AppContext.BaseDirectory));
+            if (forbidden.Any(root => IsSameOrUnder(path, root) || IsSameOrUnder(root, path)))
                 return "不能锁定系统目录、程序目录或应用锁自身所在目录（及其上级目录）";
-        }
-
-        // C:\Users 与任何用户配置文件根目录（C:\Users\xxx）
-        var usersRoot = Path.GetDirectoryName(Dir(Environment.SpecialFolder.UserProfile));
-        if (usersRoot != null)
-        {
-            usersRoot = Normalize(usersRoot);
-            if (string.Equals(path, usersRoot, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(Path.GetDirectoryName(path), usersRoot, StringComparison.OrdinalIgnoreCase))
+            using var profiles = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList");
+            var roots = new List<string> { Path.Combine(Path.GetPathRoot(Environment.SystemDirectory)!, "Users") };
+            if (profiles?.GetValue("ProfilesDirectory") is string profilesDirectory) roots.Add(Normalize(Environment.ExpandEnvironmentVariables(profilesDirectory)));
+            if (roots.Any(root => IsSameOrUnder(root, path) || string.Equals(Path.GetDirectoryName(path), root, StringComparison.OrdinalIgnoreCase)))
                 return "不能锁定整个用户目录，请选择其中的子文件夹";
+            if (profiles != null)
+                foreach (var profileName in profiles.GetSubKeyNames())
+                {
+                    using var profile = profiles.OpenSubKey(profileName);
+                    if (profile?.GetValue("ProfileImagePath") is string profilePath
+                        && IsSameOrUnder(Normalize(Environment.ExpandEnvironmentVariables(profilePath)), path))
+                        return "不能锁定整个用户配置目录";
+                }
+            return null;
         }
-
-        return null;
+        catch (Exception exception) when (exception is IOException or ArgumentException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            return "路径不安全或不可访问：" + exception.Message;
+        }
     }
 
     private static bool IsSameOrUnder(string path, string root)
         => string.Equals(path, root, StringComparison.OrdinalIgnoreCase)
-           || path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+            || path.StartsWith(Path.TrimEndingDirectorySeparator(root) + '\\', StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>读取当前安全描述符（所有者 + 组 + DACL）的 SDDL。</summary>
-    public static string ReadSddl(string path)
+    internal static bool IsLockDescriptor(string sddl)
     {
-        EnsurePrivileges();
-        var ds = new DirectoryInfo(path).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Group | AccessControlSections.Access);
-        return ds.GetSecurityDescriptorSddlForm(AccessControlSections.Owner | AccessControlSections.Group | AccessControlSections.Access);
+        var descriptor = new RawSecurityDescriptor(sddl);
+        if (descriptor.Owner != SystemSid || (descriptor.ControlFlags & ControlFlags.DiscretionaryAclProtected) == 0
+            || descriptor.DiscretionaryAcl == null || descriptor.DiscretionaryAcl.Count != 1) return false;
+        return descriptor.DiscretionaryAcl[0] is CommonAce rule && rule.AceQualifier == AceQualifier.AccessAllowed
+            && rule.SecurityIdentifier == SystemSid && (rule.AccessMask & 0x1F01FF) == 0x1F01FF;
     }
 
-    /// <summary>该文件夹当前是否处于本工具的锁定状态（所有者为 SYSTEM 且 DACL 受保护）。</summary>
     public static bool IsLockedOnDisk(string path)
     {
-        try
-        {
-            var ds = new DirectoryInfo(path).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
-            var owner = ds.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-            return owner == SystemSid && ds.AreAccessRulesProtected;
-        }
-        catch
-        {
-            return false;
-        }
+        EnsurePrivileges();
+        using var guard = PathGuard.Pin(path);
+        using var file = FileSecurity.Open(Normalize(path), writable: true);
+        return IsLockDescriptor(file.ReadSddl());
     }
 
-    /// <summary>锁定。返回锁定前的 SDDL（调用方必须保存）。已经锁定时返回 null 且不做任何事。</summary>
-    public static string? Lock(string path)
+    public static void Restore(LockedFolder folder)
     {
-        if (!EnsurePrivileges()) throw new UnauthorizedAccessException("当前进程没有修改文件夹所有者的特权");
-        if (IsLockedOnDisk(path)) return null;
-
-        var original = ReadSddl(path);
-
-        var ds = new DirectorySecurity();
-        ds.SetSecurityDescriptorSddlForm(LockedSddl, AccessControlSections.Owner | AccessControlSections.Group | AccessControlSections.Access);
-        // SetAccessControl 底层是 SetNamedSecurityInfo，会自动把可继承 ACE 传播到整个子树
-        new DirectoryInfo(path).SetAccessControl(ds);
-        return original;
-    }
-
-    /// <summary>
-    /// 恢复。originalSddl 为空时（历史数据缺失）退回到“所有者 = Administrators、启用继承、无显式 ACE”，
-    /// 这样至少能让管理员和从父目录继承的用户重新访问。
-    /// </summary>
-    public static void Unlock(string path, string? originalSddl)
-    {
-        if (!EnsurePrivileges()) throw new UnauthorizedAccessException("当前进程没有修改文件夹所有者的特权");
-
-        var restored = new DirectorySecurity();
-
-        if (!string.IsNullOrEmpty(originalSddl))
+        if (folder.AclEntries.Count > 0)
         {
-            var original = new DirectorySecurity();
-            original.SetSecurityDescriptorSddlForm(originalSddl, AccessControlSections.Owner | AccessControlSections.Group | AccessControlSections.Access);
-
-            restored.SetOwner(original.GetOwner(typeof(SecurityIdentifier))!);
-            if (original.GetGroup(typeof(SecurityIdentifier)) is { } group) restored.SetGroup(group);
-
-            // 只放回原本的显式 ACE；继承项在取消保护后由父目录重新传播下来
-            restored.SetAccessRuleProtection(original.AreAccessRulesProtected, preserveInheritance: false);
-            foreach (FileSystemAccessRule rule in original.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier)))
-                restored.AddAccessRule(rule);
+            using var session = FolderLockSession.Capture(folder.Path, folder.AclEntries);
+            session.Restore();
+            return;
         }
-        else
-        {
-            restored.SetOwner(AdminsSid);
-            restored.SetAccessRuleProtection(isProtected: false, preserveInheritance: false);
-        }
-
-        new DirectoryInfo(path).SetAccessControl(restored);
+        if (!IsLockedOnDisk(folder.Path)) return;
+        if (string.IsNullOrEmpty(folder.OriginalSddl)) throw new InvalidDataException("缺少原始权限；保留记录，禁止猜测恢复 ACL");
+        using var guard = PathGuard.Pin(folder.Path);
+        if (WhyForbidden(folder.Path) is { } reason) throw new IOException(reason);
+        if (!EnsurePrivileges()) throw new UnauthorizedAccessException("缺少恢复文件夹权限的特权");
+        using var file = FileSecurity.Open(Normalize(folder.Path), writable: true);
+        file.WriteSddl(folder.OriginalSddl);
     }
 }

@@ -19,12 +19,13 @@ public static class LogStore
             try
             {
                 Directory.CreateDirectory(ConfigStore.DataDirectory);
+                using var guard = PathGuard.Pin(ConfigStore.DataDirectory);
 
                 var fi = new FileInfo(ConfigStore.LogPath);
                 if (fi.Exists && fi.Length > MaxBytes)
                     File.Move(ConfigStore.LogPath, ConfigStore.LogPath + ".1", overwrite: true);
 
-                File.AppendAllText(ConfigStore.LogPath, JsonSerializer.Serialize(entry, LineOptions) + Environment.NewLine);
+                ConfigStore.AppendLog(ConfigStore.LogPath, JsonSerializer.Serialize(entry, LineOptions) + Environment.NewLine);
             }
             catch
             {

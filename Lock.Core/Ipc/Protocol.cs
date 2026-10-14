@@ -13,6 +13,9 @@ public static class Protocol
     /// <summary>管道名。开发调试时可用环境变量 APPLOCK_PIPE 覆盖，以便与已安装的服务并存。</summary>
     public static readonly string PipeName = Environment.GetEnvironmentVariable("APPLOCK_PIPE") is { Length: > 0 } p ? p : "AppLock.v1";
     public const int Version = 1;
+    public static bool AllowDebugClients => Environment.UserInteractive
+        && PipeName != "AppLock.v1"
+        && Environment.GetEnvironmentVariable("APPLOCK_ALLOW_DEBUG_CLIENTS") == "1";
 
     // ---- 请求类型 ----
     public const string Hello = "hello";

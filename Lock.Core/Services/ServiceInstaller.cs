@@ -58,13 +58,13 @@ public static class ServiceInstaller
 
         if (QueryState() != ServiceState.NotInstalled)
         {
+            using var serviceProcess = CaptureServiceProcess();
             // 已存在：不要 delete 再 create——只要有句柄没释放（服务管理器开着、刚 sc query 过），
             // create 就会报 1072“已标记为删除”。用 config 原地更新路径即可。
             // 若上一版加固过权限，先设回可停止，否则下面 stop 会被拒。
             Run("sc.exe", $"sdset {ServiceName} {PermissiveSddl}");
             Run("sc.exe", $"stop {ServiceName}");
-            for (var i = 0; i < 40 && QueryState() == ServiceState.Running; i++)
-                Thread.Sleep(250);
+            WaitUntilStopped(serviceProcess);
             Check(Run("sc.exe", $"config {ServiceName} binPath= {quotedPath} start= auto DisplayName= \"{ServiceDisplayName}\""));
         }
         else
@@ -91,22 +91,21 @@ public static class ServiceInstaller
     {
         if (!IsAdministrator()) throw new InvalidOperationException("需要管理员权限。");
 
-        Run("schtasks.exe", $"/Delete /TN \"{TaskName}\" /F");
-        RemoveContextMenu();
-
         if (QueryState() != ServiceState.NotInstalled)
         {
+            using var serviceProcess = CaptureServiceProcess();
             // 加固后管理员也没有“停止”权，先把权限设回可停止（管理员保留了 WRITE_DAC 才能做到）
             Run("sc.exe", $"sdset {ServiceName} {PermissiveSddl}");
             Run("sc.exe", $"stop {ServiceName}");
             // 等待服务真正停止，否则 delete 会标记为“已删除”但残留
-            for (var i = 0; i < 20 && QueryState() == ServiceState.Running; i++)
-                Thread.Sleep(250);
-            Check(Run("sc.exe", $"delete {ServiceName}"));
+            WaitUntilStopped(serviceProcess);
         }
 
         // 服务已停，锁着的文件夹没人能解了——在这里把权限恢复回去，否则卸载后文件夹永久无法访问
         RestoreAllFolders();
+        if (QueryState() != ServiceState.NotInstalled) Check(Run("sc.exe", $"delete {ServiceName}"));
+        Run("schtasks.exe", $"/Delete /TN \"{TaskName}\" /F");
+        RemoveContextMenu();
 
         if (!keepData && Directory.Exists(ConfigStore.DataDirectory))
             Directory.Delete(ConfigStore.DataDirectory, recursive: true);
@@ -121,12 +120,16 @@ public static class ServiceInstaller
 
         foreach (var f in config.Folders)
         {
-            if (!Directory.Exists(f.Path)) continue;
+            if (!Directory.Exists(f.Path))
+            {
+                if (f.Locked || f.LockPending) failures.Add($"{f.Path}：目录不存在或不可访问，恢复记录已保留");
+                continue;
+            }
             try
             {
-                if (FolderLocker.IsLockedOnDisk(f.Path))
-                    FolderLocker.Unlock(f.Path, f.OriginalSddl);
+                if (f.Locked || f.LockPending || FolderLocker.IsLockedOnDisk(f.Path)) FolderLocker.Restore(f);
                 f.Locked = false;
+                f.LockPending = false;
                 changed = true;
             }
             catch (Exception ex)
@@ -137,10 +140,45 @@ public static class ServiceInstaller
 
         if (changed)
         {
-            try { ConfigStore.Save(config); } catch { /* 数据目录可能即将被删除 */ }
+            ConfigStore.Save(config);
         }
         if (failures.Count > 0)
             throw new InvalidOperationException("以下文件夹权限恢复失败，请手动在“属性 → 安全”里取得所有权：\n" + string.Join("\n", failures));
+    }
+
+    private static Process? CaptureServiceProcess()
+    {
+        var (code, output) = Run("sc.exe", $"queryex {ServiceName}");
+        Check((code, output));
+        var match = System.Text.RegularExpressions.Regex.Match(output, @"\bPID\s*:\s*(\d+)");
+        if (!match.Success || !int.TryParse(match.Groups[1].Value, out var processId))
+            throw new InvalidOperationException("无法确认服务进程，已取消操作。");
+        if (processId == 0) return null;
+        var process = Process.GetProcessById(processId);
+        try
+        {
+            _ = process.SafeHandle;
+            return process;
+        }
+        catch
+        {
+            process.Dispose();
+            throw;
+        }
+    }
+
+    private static void WaitUntilStopped(Process? serviceProcess)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (QueryState() is ServiceState.Stopped or ServiceState.NotInstalled)
+            {
+                if (serviceProcess == null || serviceProcess.WaitForExit(250)) return;
+            }
+            Thread.Sleep(250);
+        }
+        throw new TimeoutException("服务未能停止，已取消安装/卸载并保留数据。");
     }
 
     // ---- 资源管理器右键菜单 ----
@@ -226,8 +264,9 @@ public static class ServiceInstaller
             </Task>
             """;
 
-        var xmlPath = Path.Combine(Path.GetTempPath(), "AppLockAgentTask.xml");
-        File.WriteAllText(xmlPath, xml, Encoding.Unicode);
+        var xmlPath = Path.Combine(ConfigStore.DataDirectory, "AgentTask-" + Guid.NewGuid().ToString("N") + ".xml");
+        using (var stream = new FileStream(xmlPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        using (var writer = new StreamWriter(stream, Encoding.Unicode)) writer.Write(xml);
         try
         {
             Check(Run("schtasks.exe", $"/Create /TN \"{TaskName}\" /XML \"{xmlPath}\" /F"));
@@ -248,9 +287,14 @@ public static class ServiceInstaller
             RedirectStandardError = true,
         };
         using var p = Process.Start(psi)!;
-        var output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-        p.WaitForExit();
-        return (p.ExitCode, output);
+        var output = p.StandardOutput.ReadToEndAsync();
+        var error = p.StandardError.ReadToEndAsync();
+        if (!p.WaitForExit(30000))
+        {
+            p.Kill(entireProcessTree: true);
+            throw new TimeoutException("命令执行超时：" + file);
+        }
+        return (p.ExitCode, output.GetAwaiter().GetResult() + error.GetAwaiter().GetResult());
     }
 
     private static void Check((int Code, string Output) result)

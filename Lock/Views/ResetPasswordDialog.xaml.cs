@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Interop;
 using Lock.Core.Native;
 using Lock.Services;
+using Lock.Core.Services;
 
 namespace Lock.Views;
 
@@ -36,7 +37,7 @@ public partial class ResetPasswordDialog : Window
         var key = KeyBox.Text.Trim();
         var p1 = Password1.Password;
         if (key.Length == 0) { ShowError("请输入恢复密钥"); return; }
-        if (p1.Length < 4) { ShowError("密码长度至少 4 位"); return; }
+        if (PasswordHasher.NewPasswordError(p1) is { } passwordError) { ShowError(passwordError); return; }
         if (p1 != Password2.Password) { ShowError("两次输入的密码不一致"); return; }
 
         _busy = true;

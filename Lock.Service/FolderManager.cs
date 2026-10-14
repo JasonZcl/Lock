@@ -21,7 +21,11 @@ public sealed class FolderManager : IDisposable
     {
         _config = config;
         _agents = agents;
-        _relockTimer = new Timer(_ => RelockExpired(), null, Timeout.Infinite, Timeout.Infinite);
+        _relockTimer = new Timer(_ =>
+        {
+            try { RelockExpired(); }
+            catch (Exception exception) { ServiceLog.Error("自动重新锁定失败", exception); }
+        }, null, Timeout.Infinite, Timeout.Infinite);
         _agents.Disconnected += OnAgentDisconnected;
     }
 
@@ -78,42 +82,43 @@ public sealed class FolderManager : IDisposable
 
     public string? Add(string path, string? user)
     {
-        var norm = SafeNormalize(path);
-        if (norm == null) return "路径无效";
-        if (FolderLocker.WhyForbidden(norm) is { } why) return why;
-
-        var exists = _config.UpdateFolders(list =>
+        lock (_opLock)
         {
-            if (list.Any(f => PathEquals(f.Path, norm))) return (false, true);
-            // 已纳管文件夹的上级或下级也不允许，嵌套锁会让权限恢复顺序变得不可靠
-            if (list.Any(f => IsNested(f.Path, norm))) return (false, true);
-            list.Add(new LockedFolder { Path = norm, DisplayName = Path.GetFileName(norm) is { Length: > 0 } n ? n : norm, Locked = false });
-            return (true, false);
-        });
-        if (exists) return "该文件夹（或其上级/下级）已在列表中";
-
-        Log(LogEvents.FolderAdded, norm, user);
-        var err = DoLock(norm, LogEvents.FolderLocked, user);
-        if (err != null)
-        {
-            // 锁不上就别留在列表里
-            _config.UpdateFolders(list => (list.RemoveAll(f => PathEquals(f.Path, norm)) > 0, 0));
-            return err;
+            var norm = SafeNormalize(path);
+            if (norm == null) return "路径无效";
+            if (FolderLocker.WhyForbidden(norm) is { } why) return why;
+            var exists = _config.UpdateFolders(list =>
+            {
+                if (list.Any(f => PathEquals(f.Path, norm) || IsNested(f.Path, norm))) return (false, true);
+                if (list.Count >= 128) throw new ArgumentException("最多管理 128 个文件夹");
+                list.Add(new LockedFolder { Path = norm, DisplayName = Path.GetFileName(norm) is { Length: > 0 } name ? name : norm, Locked = false });
+                return (true, false);
+            });
+            if (exists) return "该文件夹（或其上级/下级）已在列表中";
+            Log(LogEvents.FolderAdded, norm, user);
+            var error = DoLock(norm, LogEvents.FolderLocked, user);
+            if (error != null)
+            {
+                _config.UpdateFolders(list => (list.RemoveAll(folder => PathEquals(folder.Path, norm) && folder.AclEntries.Count == 0 && !folder.LockPending) > 0, 0));
+                return error;
+            }
+            Changed?.Invoke();
+            return null;
         }
-        Changed?.Invoke();
-        return null;
     }
 
     public string? Remove(string path, string? user)
     {
-        var norm = SafeNormalize(path) ?? path;
-        var err = DoUnlock(norm, LogEvents.FolderUnlocked, user, removing: true);
-        if (err != null) return err;
-
-        _config.UpdateFolders(list => (list.RemoveAll(f => PathEquals(f.Path, norm)) > 0, 0));
-        Log(LogEvents.FolderRemoved, norm, user);
-        Changed?.Invoke();
-        return null;
+        lock (_opLock)
+        {
+            var norm = SafeNormalize(path) ?? path;
+            var error = DoUnlock(norm, LogEvents.FolderUnlocked, user, removing: true);
+            if (error != null) return error;
+            _config.UpdateFolders(list => (list.RemoveAll(folder => PathEquals(folder.Path, norm)) > 0, 0));
+            Log(LogEvents.FolderRemoved, norm, user);
+            Changed?.Invoke();
+            return null;
+        }
     }
 
     public string? Lock(string path, string? user)
@@ -133,22 +138,27 @@ public sealed class FolderManager : IDisposable
     /// <summary>注销或托盘退出时把该会话已解锁的文件夹全部锁回去。这里简单处理：没有任何托盘在线就全锁。</summary>
     private void OnAgentDisconnected(ClientSession _)
     {
-        if (_agents.All().Any(c => c.IsConnected)) return;
         var any = false;
-        foreach (var f in _config.GetFoldersSnapshot().Where(f => !f.Locked))
-            any |= DoLock(f.Path, LogEvents.FolderRelocked, "托盘程序断开") == null;
+        lock (_opLock)
+        {
+            if (_agents.All().Any(c => c.IsConnected && (AgentHub.IsGenuine(c) || Protocol.AllowDebugClients))) return;
+            foreach (var f in _config.GetFoldersSnapshot().Where(f => !f.Locked))
+                any |= DoLock(f.Path, LogEvents.FolderRelocked, "托盘程序断开") == null;
+        }
         if (any) Changed?.Invoke();
     }
 
     private void RelockExpired()
     {
-        var minutes = _config.GetSettings().FolderRelockMinutes;
-        if (minutes <= 0) return;
-
-        var deadline = DateTime.UtcNow.AddMinutes(-minutes);
         var any = false;
-        foreach (var f in _config.GetFoldersSnapshot().Where(f => !f.Locked && f.UnlockedAtUtc != null && f.UnlockedAtUtc <= deadline))
-            any |= DoLock(f.Path, LogEvents.FolderRelocked, "到期") == null;
+        lock (_opLock)
+        {
+            var minutes = _config.GetSettings().FolderRelockMinutes;
+            if (minutes <= 0) return;
+            var deadline = DateTime.UtcNow.AddMinutes(-minutes);
+            foreach (var f in _config.GetFoldersSnapshot().Where(f => !f.Locked && f.UnlockedAtUtc != null && f.UnlockedAtUtc <= deadline))
+                any |= DoLock(f.Path, LogEvents.FolderRelocked, "到期") == null;
+        }
         if (any) Changed?.Invoke();
     }
 
@@ -168,17 +178,50 @@ public sealed class FolderManager : IDisposable
 
             try
             {
-                var original = FolderLocker.Lock(path);
+                if (folder.AclEntries.Count == 0 && FolderLocker.IsLockedOnDisk(path))
+                    return "旧版本文件夹需要先用密码解锁一次，再重新锁定以升级子文件保护";
+                using var session = FolderLockSession.Capture(path,
+                    folder.AclEntries.Count > 0 && (folder.Locked || folder.LockPending) ? folder.AclEntries : null);
+                var originals = session.Entries;
                 _config.UpdateFolders(list =>
                 {
                     var f = list.First(x => PathEquals(x.Path, path));
-                    // 磁盘上已是锁定状态时 Lock 返回 null，此时保留之前记录的原始权限
-                    if (original != null) f.OriginalSddl = original;
+                    f.AclEntries = originals;
+                    f.OriginalSddl = originals.First(entry => entry.RelativePath.Length == 0).Sddl;
+                    f.LockPending = true;
                     f.Locked = true;
                     f.UnlockedAtUtc = null;
                     return (true, 0);
                 });
-                if (original != null || !folder.Locked) Log(evt, path, user);
+                try
+                {
+                    session.Lock();
+                    _config.UpdateFolders(list =>
+                    {
+                        var f = list.First(x => PathEquals(x.Path, path));
+                        f.Locked = true;
+                        f.LockPending = false;
+                        return (true, 0);
+                    });
+                }
+                catch
+                {
+                    try
+                    {
+                        session.Restore();
+                        _config.UpdateFolders(list =>
+                        {
+                            var f = list.First(x => PathEquals(x.Path, path));
+                            f.Locked = false;
+                            f.LockPending = false;
+                            f.UnlockedAtUtc = DateTime.UtcNow;
+                            return (true, 0);
+                        });
+                    }
+                    catch (Exception recovery) { ServiceLog.Error("回滚失败，已保留原始权限记录：" + path, recovery); }
+                    throw;
+                }
+                if (!folder.Locked || folder.LockPending) Log(evt, path, user);
                 return null;
             }
             catch (Exception ex)
@@ -198,17 +241,18 @@ public sealed class FolderManager : IDisposable
             if (folder == null) return "该文件夹不在列表中";
 
             // 移除时即使目录已不存在也允许（只是从列表删掉）
-            if (!Directory.Exists(path)) return removing ? null : "文件夹不存在（已被移动或删除？）";
+            if (!Directory.Exists(path)) return removing && !folder.Locked && !folder.LockPending
+                ? null : "文件夹不存在或不可访问，已保留原始权限记录";
 
             try
             {
-                if (FolderLocker.IsLockedOnDisk(path))
-                    FolderLocker.Unlock(path, folder.OriginalSddl);
+                if (folder.Locked || folder.LockPending || FolderLocker.IsLockedOnDisk(path)) FolderLocker.Restore(folder);
 
                 _config.UpdateFolders(list =>
                 {
                     var f = list.First(x => PathEquals(x.Path, path));
                     f.Locked = false;
+                    f.LockPending = false;
                     f.UnlockedAtUtc = DateTime.UtcNow;
                     return (true, 0);
                 });

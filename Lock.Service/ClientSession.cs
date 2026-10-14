@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Lock.Core.Ipc;
 using Lock.Core.Native;
@@ -16,6 +17,7 @@ public sealed class ClientSession : IDisposable
 
     public int Id { get; }
     public uint? ProcessId { get; }
+    public long? ProcessCreatedAt { get; }
     public uint SessionId { get; }
     public string? UserName { get; }
 
@@ -24,10 +26,11 @@ public sealed class ClientSession : IDisposable
     public ClientSession(NamedPipeServerStream pipe)
     {
         _pipe = pipe;
-        _channel = new JsonLineChannel(pipe);
+        _channel = new JsonLineChannel(pipe, leaveOpen: true);
         Id = Interlocked.Increment(ref _nextId);
 
         ProcessId = NativeMethods.GetPipeClientProcessId(pipe.SafePipeHandle);
+        ProcessCreatedAt = ProcessId.HasValue ? NativeMethods.GetProcessCreationTime(ProcessId.Value) : null;
         SessionId = ProcessId.HasValue ? NativeMethods.GetProcessSessionId(ProcessId.Value) ?? 0 : 0;
 
         try { UserName = pipe.GetImpersonationUserName(); }
@@ -40,6 +43,8 @@ public sealed class ClientSession : IDisposable
     public async Task RunAsync(Func<ClientSession, JsonObject, Task<JsonObject>> handler, CancellationToken ct)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _cts.Token);
+        var rateWindow = Stopwatch.StartNew();
+        var requestCount = 0;
 
         while (!linked.IsCancellationRequested)
         {
@@ -52,24 +57,26 @@ public sealed class ClientSession : IDisposable
             catch (IOException) { break; }
 
             if (request == null) break;
-
-            // 每个请求独立处理，避免慢请求阻塞后续读取
-            _ = Task.Run(async () =>
+            if (rateWindow.Elapsed >= TimeSpan.FromSeconds(1))
             {
-                JsonObject response;
-                try
-                {
-                    response = await handler(this, request).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    ServiceLog.Error("处理请求异常", ex);
-                    response = new JsonObject { ["ok"] = false, ["error"] = "内部错误" };
-                }
-
-                response["id"] = request["id"]?.DeepClone();
-                await SafeSendAsync(response).ConfigureAwait(false);
-            }, linked.Token);
+                requestCount = 0;
+                rateWindow.Restart();
+            }
+            if (++requestCount > 30) throw new InvalidDataException("请求过于频繁");
+            if (request["id"] is not JsonValue requestId || !requestId.TryGetValue<int>(out _))
+                throw new InvalidDataException("请求编号无效");
+            JsonObject response;
+            try
+            {
+                response = await handler(this, request).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                ServiceLog.Error("处理请求异常", ex);
+                response = new JsonObject { ["ok"] = false, ["error"] = "内部错误" };
+            }
+            response["id"] = requestId.DeepClone();
+            await SafeSendAsync(response).ConfigureAwait(false);
         }
     }
 
@@ -86,12 +93,14 @@ public sealed class ClientSession : IDisposable
     {
         try
         {
-            await _channel.SendAsync(message, _cts.Token).ConfigureAwait(false);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            await _channel.SendAsync(message, timeout.Token).ConfigureAwait(false);
         }
         catch (Exception)
         {
             // 对方已断开，读循环会自行退出
-            _cts.Cancel();
+            try { _cts.Cancel(); } catch (ObjectDisposedException) { }
         }
     }
 

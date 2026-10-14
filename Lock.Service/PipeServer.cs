@@ -32,32 +32,41 @@ public sealed class PipeServer
 
     public async Task RunAsync(CancellationToken ct)
     {
-        while (!ct.IsCancellationRequested)
+        var pipes = new List<NamedPipeServerStream>();
+        try
         {
-            NamedPipeServerStream pipe;
-            try
-            {
-                pipe = CreatePipe();
-                await pipe.WaitForConnectionAsync(ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                ServiceLog.Error("创建管道失败", ex);
-                await Task.Delay(1000, ct).ConfigureAwait(false);
-                continue;
-            }
-
-            _ = Task.Run(() => ServeAsync(pipe, ct), ct);
+            for (var index = 0; index < 16; index++) pipes.Add(CreatePipe(index == 0));
+            await Task.WhenAll(pipes.Select(pipe => AcceptAsync(pipe, ct))).ConfigureAwait(false);
+        }
+        finally
+        {
+            foreach (var pipe in pipes) pipe.Dispose();
         }
     }
 
-    private static NamedPipeServerStream CreatePipe()
+    private async Task AcceptAsync(NamedPipeServerStream pipe, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await pipe.WaitForConnectionAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await ServeAsync(pipe, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (pipe.IsConnected) pipe.Disconnect();
+            }
+        }
+    }
+
+    private static NamedPipeServerStream CreatePipe(bool firstInstance)
     {
         var security = new PipeSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new PipeAccessRule(
+            new SecurityIdentifier(WellKnownSidType.NetworkSid, null),
+            PipeAccessRights.FullControl, AccessControlType.Deny));
         // 任何已登录用户都可以连接；安全性由密码校验保证，而不是管道 ACL
         security.AddAccessRule(new PipeAccessRule(
             new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null),
@@ -80,7 +89,7 @@ public sealed class PipeServer
             PipeDirection.InOut,
             NamedPipeServerStream.MaxAllowedServerInstances,
             PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous,
+            PipeOptions.Asynchronous | (firstInstance ? PipeOptions.FirstPipeInstance : PipeOptions.None),
             inBufferSize: 0,
             outBufferSize: 0,
             security);
@@ -89,6 +98,7 @@ public sealed class PipeServer
     private async Task ServeAsync(NamedPipeServerStream pipe, CancellationToken ct)
     {
         using var client = new ClientSession(pipe);
+        if (!AgentHub.IsGenuine(client) && !Protocol.AllowDebugClients) return;
         ServiceLog.Info($"客户端连接：#{client.Id} pid={client.ProcessId} session={client.SessionId} user={client.UserName}");
         _agents.Add(client);
         try
@@ -101,6 +111,7 @@ public sealed class PipeServer
         }
         finally
         {
+            _config.RevokeClientTokens(client.Id);
             _agents.Remove(client);
             ServiceLog.Info($"客户端断开：#{client.Id}");
         }
@@ -120,7 +131,7 @@ public sealed class PipeServer
             Protocol.GetStatus => Ok(Status()),
             Protocol.Setup => HandleSetup(Get<PasswordData>(data)),
             Protocol.Login => HandleLogin(client, Get<PasswordData>(data)),
-            Protocol.Logout => Do(() => _config.Logout(token)),
+            Protocol.Logout => Do(() => _config.Logout(token, client.Id)),
             Protocol.ResetPassword => HandleReset(client, Get<ResetPasswordData>(data)),
             Protocol.UnlockAttempt => HandleAttempt(client, Get<UnlockAttemptData>(data)),
             Protocol.UnlockCancel => Do(() => _engine.Cancel(client, Get<UnlockCancelData>(data).RequestId)),
@@ -129,15 +140,15 @@ public sealed class PipeServer
             Protocol.FolderStatus => Ok(_folders.Status(Get<FolderPathData>(data).Path)),
             Protocol.FolderLock => Result(_folders.Lock(Get<FolderPathData>(data).Path, client.UserName)),
             Protocol.FolderUnlock => HandleFolderUnlock(client, token, Get<FolderUnlockData>(data)),
-            Protocol.FolderList => Auth(token, () => Ok(_folders.List())),
-            Protocol.FolderAdd => Auth(token, () => Result(_folders.Add(Get<FolderPathData>(data).Path, client.UserName))),
-            Protocol.FolderRemove => Auth(token, () => Result(_folders.Remove(Get<FolderPathData>(data).Path, client.UserName))),
+            Protocol.FolderList => Auth(client, token, () => Ok(_folders.List())),
+            Protocol.FolderAdd => Auth(client, token, () => Result(_folders.Add(Get<FolderPathData>(data).Path, client.UserName))),
+            Protocol.FolderRemove => Auth(client, token, () => Result(_folders.Remove(Get<FolderPathData>(data).Path, client.UserName))),
 
             // 以下需要登录
-            Protocol.GetSettings => Auth(token, () => Ok(_config.GetSettings())),
-            Protocol.SetSettings => Auth(token, () => HandleSetSettings(client, Get<LockSettings>(data))),
-            Protocol.ChangePassword => Auth(token, () => HandleChangePassword(client, Get<PasswordData>(data))),
-            Protocol.GetLog => Auth(token, () => HandleGetLog(Get<GetLogData>(data))),
+            Protocol.GetSettings => Auth(client, token, () => Ok(_config.GetSettings())),
+            Protocol.SetSettings => Auth(client, token, () => HandleSetSettings(client, Get<LockSettings>(data))),
+            Protocol.ChangePassword => Auth(client, token, () => HandleChangePassword(client, Get<PasswordData>(data))),
+            Protocol.GetLog => Auth(client, token, () => HandleGetLog(Get<GetLogData>(data))),
 
             _ => Fail("未知请求类型：" + type),
         };
@@ -159,7 +170,7 @@ public sealed class PipeServer
 
     private JsonObject HandleSetup(PasswordData d)
     {
-        if (d.Password.Length < 4) return Fail("密码长度至少 4 位");
+        if (PasswordHasher.NewPasswordError(d.Password) is { } error) return Fail(error);
         var key = _config.Setup(d.Password);
         return key == null ? Fail("密码已设置，不能重复初始化") : Ok(new RecoveryKeyData { RecoveryKey = key });
     }
@@ -169,7 +180,7 @@ public sealed class PipeServer
         if (_config.LockoutRemainingSeconds is { } locked)
             return Fail($"错误次数过多，请 {locked} 秒后再试", "lockout");
 
-        var token = _config.Login(d.Password);
+        var token = _config.Login(d.Password, client.Id);
         if (token != null) return Ok(new LoginData { Token = token });
 
         LogStore.Append(new LogEntry { Event = LogEvents.LoginFailed, SessionId = client.SessionId, User = client.UserName });
@@ -178,7 +189,7 @@ public sealed class PipeServer
 
     private JsonObject HandleReset(ClientSession client, ResetPasswordData d)
     {
-        if (d.NewPassword.Length < 4) return Fail("密码长度至少 4 位");
+        if (PasswordHasher.NewPasswordError(d.NewPassword) is { } error) return Fail(error);
         if (_config.LockoutRemainingSeconds is { } locked)
             return Fail($"错误次数过多，请 {locked} 秒后再试", "lockout");
         var key = _config.ResetPassword(d.RecoveryKey, d.NewPassword);
@@ -190,7 +201,7 @@ public sealed class PipeServer
 
     private JsonObject HandleChangePassword(ClientSession client, PasswordData d)
     {
-        if (d.Password.Length < 4) return Fail("密码长度至少 4 位");
+        if (PasswordHasher.NewPasswordError(d.Password) is { } error) return Fail(error);
         var key = _config.ChangePassword(d.Password);
         LogStore.Append(new LogEntry { Event = LogEvents.PasswordChanged, SessionId = client.SessionId, User = client.UserName });
         return Ok(new RecoveryKeyData { RecoveryKey = key });
@@ -225,7 +236,7 @@ public sealed class PipeServer
     private JsonObject HandleFolderUnlock(ClientSession client, string? token, FolderUnlockData d)
     {
         // 管理界面已登录 → 免密；右键菜单 → 必须给密码（同样受暴力破解锁定约束）
-        if (!_config.ValidateToken(token))
+        if (!_config.ValidateToken(token, client.Id))
         {
             if (_config.LockoutRemainingSeconds is { } locked)
                 return Fail($"错误次数过多，请 {locked} 秒后再试", "lockout");
@@ -245,8 +256,8 @@ public sealed class PipeServer
 
     // ---- 小工具 ----
 
-    private JsonObject Auth(string? token, Func<JsonObject> action)
-        => _config.ValidateToken(token) ? action() : Fail("未登录或登录已过期", "unauthorized");
+    private JsonObject Auth(ClientSession client, string? token, Func<JsonObject> action)
+        => _config.ValidateToken(token, client.Id) ? action() : Fail("未登录或登录已过期", "unauthorized");
 
     private static T Get<T>(JsonNode? node) where T : new()
         => JsonLineChannel.FromNode<T>(node) ?? new T();

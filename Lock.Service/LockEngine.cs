@@ -24,15 +24,11 @@ public sealed class LockEngine : IDisposable
         public Dictionary<uint, long> Pids { get; } = new();
         public int Attempts { get; set; }
 
-        public void Add(uint pid)
+        public void Add(uint pid, long created)
         {
-            var created = NativeMethods.GetProcessCreationTime(pid);
-            if (created != null) Pids[pid] = created.Value;
+            Pids[pid] = created;
         }
     }
-
-    /// <summary>“跳板进程”判定窗口：父进程已退出、且同一程序在此时间内刚解锁过，则视为同一次启动。</summary>
-    private static readonly TimeSpan LauncherWindow = TimeSpan.FromSeconds(5);
 
     private readonly object _sync = new();
     private readonly ConfigManager _config;
@@ -45,6 +41,7 @@ public sealed class LockEngine : IDisposable
     private readonly Dictionary<string, Pending> _pending = new();
     // key -> 最近一次解锁时间（宽限期）
     private readonly Dictionary<string, DateTime> _lastUnlock = new();
+    private DateTime _lastPruned = DateTime.MinValue;
 
     public LockEngine(ConfigManager config, AgentHub agents)
     {
@@ -94,7 +91,8 @@ public sealed class LockEngine : IDisposable
                 // 已经在等待解锁的不动
                 if (_pending.Values.Any(p => p.Pids.ContainsKey(pid))) continue;
 
-                MarkUnlocked(app.Key, pid);
+                if (NativeMethods.GetProcessSessionId(pid) is not { } sessionId) continue;
+                MarkUnlocked(ScopeKey(app.Key, sessionId), pid);
                 adopted++;
             }
         }
@@ -107,6 +105,7 @@ public sealed class LockEngine : IDisposable
 
     private void OnProcessStarted(ProcessMonitor.ProcessInfo info)
     {
+        if (info.CreatedAt == null || NativeMethods.GetProcessCreationTime(info.Pid) != info.CreatedAt) return;
         var settings = _config.GetSettings();
         if (settings.Paused || !_config.HasPassword) return;
 
@@ -121,47 +120,37 @@ public sealed class LockEngine : IDisposable
 
         // 不拦截自己和托盘程序
         if (info.Pid == (uint)Environment.ProcessId) return;
-        if (_agents.All().Any(c => c.ProcessId == info.Pid)) return;
+        if (_agents.All().Any(c => c.ProcessId == info.Pid && AgentHub.IsGenuine(c))) return;
 
-        var key = app.Key;
-        var sessionId = NativeMethods.GetProcessSessionId(info.Pid) ?? 0;
+        if (NativeMethods.GetProcessSessionId(info.Pid) is not { } sessionId) return;
+        var key = ScopeKey(app.Key, sessionId);
         Pending? created = null;
 
         lock (_sync)
         {
+            PruneUnlocked();
             // 1. 宽限期
             if (settings.UnlockGraceSeconds > 0
                 && _lastUnlock.TryGetValue(key, out var last)
                 && (DateTime.UtcNow - last).TotalSeconds < settings.UnlockGraceSeconds)
             {
-                MarkUnlocked(key, info.Pid);
+                MarkUnlocked(key, info.Pid, info.CreatedAt);
                 Log(LogEvents.GracePass, app, info, sessionId, null);
                 return;
             }
 
             // 2. 父进程（或祖先）是已解锁的同一程序 → 这是它自己派生的子进程，放行。
             //    从桌面/启动器点开的新实例父进程是 explorer 之类，不会命中，必须输密码。
-            var (ancestor, parentGone) = FindUnlockedAncestor(key, info.Pid);
+            var (ancestor, _) = FindUnlockedAncestor(key, info.Pid);
             if (ancestor != null)
             {
-                MarkUnlocked(key, info.Pid);
+                MarkUnlocked(key, info.Pid, info.CreatedAt);
                 Log(LogEvents.ChildPass, app, info, sessionId, null, $"父进程 {ancestor}");
                 return;
             }
 
-            // 2b. “跳板”模式：A 解锁后启动 B 并立刻退出（Electron/Squirrel、各种 Launcher 常见）。
-            //     B 的父进程已经不存在无法校验，但该程序几秒内刚解锁过，视为同一次启动，避免连弹两次密码框。
-            if (parentGone
-                && _lastUnlock.TryGetValue(key, out var recent)
-                && (DateTime.UtcNow - recent) < LauncherWindow)
-            {
-                MarkUnlocked(key, info.Pid);
-                Log(LogEvents.ChildPass, app, info, sessionId, null, "父进程已退出，解锁后数秒内启动");
-                return;
-            }
-
             // 3. 挂起
-            if (!NativeMethods.SuspendProcess(info.Pid))
+            if (!NativeMethods.SuspendProcess(info.Pid, info.CreatedAt))
             {
                 Log(LogEvents.SuspendFailed, app, info, sessionId, null);
                 return;
@@ -171,7 +160,7 @@ public sealed class LockEngine : IDisposable
             var existing = _pending.Values.FirstOrDefault(p => p.Key == key && p.SessionId == sessionId);
             if (existing != null)
             {
-                existing.Add(info.Pid);
+                existing.Add(info.Pid, info.CreatedAt.Value);
                 return;
             }
 
@@ -179,7 +168,7 @@ public sealed class LockEngine : IDisposable
             var agent = _agents.Find(sessionId);
             if (agent == null)
             {
-                Kill(info.Pid);
+                Kill(info.Pid, info.CreatedAt);
                 Log(LogEvents.NoAgent, app, info, sessionId, null);
                 return;
             }
@@ -194,7 +183,7 @@ public sealed class LockEngine : IDisposable
                 SessionId = sessionId,
                 Agent = agent,
             };
-            created.Add(info.Pid);
+            created.Add(info.Pid, info.CreatedAt.Value);
             _pending[created.RequestId] = created;
         }
 
@@ -229,7 +218,7 @@ public sealed class LockEngine : IDisposable
             {
                 _pending.Remove(requestId);
                 _lastUnlock[pending.Key] = DateTime.UtcNow;
-                foreach (var pid in pending.Pids.Keys) MarkUnlocked(pending.Key, pid);
+                foreach (var (pid, processCreated) in pending.Pids) MarkUnlocked(pending.Key, pid, processCreated);
                 remaining = 0;
             }
             else
@@ -281,6 +270,12 @@ public sealed class LockEngine : IDisposable
         {
             lost = _pending.Values.Where(p => p.Agent == client).ToList();
             foreach (var p in lost) _pending.Remove(p.RequestId);
+            if (!_agents.All().Any(agent => agent.SessionId == client.SessionId && agent.IsConnected))
+            {
+                var prefix = $"session:{client.SessionId}|";
+                foreach (var key in _lastUnlock.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).ToList()) _lastUnlock.Remove(key);
+                foreach (var key in _unlocked.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).ToList()) _unlocked.Remove(key);
+            }
         }
 
         foreach (var p in lost)
@@ -292,15 +287,27 @@ public sealed class LockEngine : IDisposable
 
     // ---- 辅助（要求已持有 _sync 的标注方法） ----
 
-    private void MarkUnlocked(string key, uint pid)
+    private void MarkUnlocked(string key, uint pid, long? expectedCreation = null)
     {
         // 拿不到创建时间（进程已退出）就没必要记录
         var created = NativeMethods.GetProcessCreationTime(pid);
-        if (created == null) return;
+        if (created == null || (expectedCreation.HasValue && created != expectedCreation)) return;
 
         if (!_unlocked.TryGetValue(key, out var map))
             _unlocked[key] = map = new Dictionary<uint, long>();
         map[pid] = created.Value;
+    }
+
+    private static string ScopeKey(string appKey, uint sessionId) => $"session:{sessionId}|{appKey}";
+
+    private void PruneUnlocked()
+    {
+        if ((DateTime.UtcNow - _lastPruned).TotalMinutes < 1) return;
+        _lastPruned = DateTime.UtcNow;
+        foreach (var key in _unlocked.Keys.ToList())
+            foreach (var pid in _unlocked[key].Keys.ToList()) IsUnlockedProcess(key, pid);
+        foreach (var key in _lastUnlock.Where(entry => (DateTime.UtcNow - entry.Value).TotalDays > 7).Select(entry => entry.Key).ToList())
+            _lastUnlock.Remove(key);
     }
 
     /// <summary>该 pid 是否仍是当初登记的那个已解锁进程（活着且创建时间一致，排除 PID 复用）。</summary>
@@ -343,12 +350,11 @@ public sealed class LockEngine : IDisposable
         return (null, false);
     }
 
-    private static void Kill(uint pid)
+    private static void Kill(uint pid, long? created)
     {
         try
         {
-            using var p = Process.GetProcessById((int)pid);
-            p.Kill(entireProcessTree: true);
+            NativeMethods.TerminateIfSame(pid, created);
         }
         catch
         {
@@ -361,13 +367,13 @@ public sealed class LockEngine : IDisposable
     {
         foreach (var (pid, created) in pids)
         {
-            if (NativeMethods.GetProcessCreationTime(pid) == created) Kill(pid);
+            Kill(pid, created);
         }
     }
 
     private static void ResumeIfSame(uint pid, long created)
     {
-        if (NativeMethods.GetProcessCreationTime(pid) == created) NativeMethods.ResumeProcess(pid);
+        NativeMethods.ResumeProcess(pid, created);
     }
 
     private static string DisplayNameOf(LockedApp app)

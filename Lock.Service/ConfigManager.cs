@@ -13,7 +13,7 @@ public sealed class ConfigManager
 
     private readonly object _sync = new();
     private AppConfig _config;
-    private readonly Dictionary<string, DateTime> _tokens = new();
+    private readonly Dictionary<string, (DateTime Expires, int ClientId)> _tokens = new();
 
     public ConfigManager()
     {
@@ -27,8 +27,13 @@ public sealed class ConfigManager
     {
         lock (_sync)
         {
-            var (changed, result) = action(_config.Folders);
-            if (changed) ConfigStore.Save(_config);
+            var next = ConfigStore.Clone(_config);
+            var (changed, result) = action(next.Folders);
+            if (changed)
+            {
+                ConfigStore.Save(next);
+                _config = next;
+            }
             return result;
         }
     }
@@ -41,6 +46,11 @@ public sealed class ConfigManager
             {
                 Path = f.Path, DisplayName = f.DisplayName, OriginalSddl = f.OriginalSddl,
                 Locked = f.Locked, UnlockedAtUtc = f.UnlockedAtUtc,
+                LockPending = f.LockPending,
+                AclEntries = f.AclEntries.Select(entry => new FolderAclEntry
+                {
+                    RelativePath = entry.RelativePath, Identity = entry.Identity, Sddl = entry.Sddl,
+                }).ToList(),
             }).ToList();
         }
     }
@@ -63,6 +73,7 @@ public sealed class ConfigManager
                 UnlockGraceSeconds = _config.Settings.UnlockGraceSeconds,
                 MaxAttempts = _config.Settings.MaxAttempts,
                 Paused = _config.Settings.Paused,
+                FolderRelockMinutes = _config.Settings.FolderRelockMinutes,
             };
         }
     }
@@ -71,17 +82,25 @@ public sealed class ConfigManager
     {
         lock (_sync)
         {
+            if (settings.LockedApps == null || settings.LockedApps.Count > 512
+                || settings.MaxAttempts is < 1 or > 100 || settings.UnlockGraceSeconds is < 0 or > 604800
+                || settings.FolderRelockMinutes is < 0 or > 10080)
+                throw new ArgumentException("设置数值越界");
             foreach (var app in settings.LockedApps)
             {
+                if (app == null || string.IsNullOrWhiteSpace(app.ExeName) || app.ExeName.Length > 260
+                    || app.ExeName != Path.GetFileName(app.ExeName) || !Enum.IsDefined(app.MatchMode)
+                    || app.DisplayName == null || app.DisplayName.Length > 256)
+                    throw new ArgumentException("应用规则无效");
                 app.ExeName = app.ExeName.ToLowerInvariant();
                 if (app.MatchMode == MatchMode.FullPath && string.IsNullOrWhiteSpace(app.FullPath))
-                    app.MatchMode = MatchMode.ExeName;
+                    throw new ArgumentException("完整路径匹配必须提供路径");
+                if (app.MatchMode == MatchMode.FullPath) app.FullPath = FolderLocker.Normalize(app.FullPath!);
             }
-            settings.MaxAttempts = Math.Max(1, settings.MaxAttempts);
-            settings.UnlockGraceSeconds = Math.Max(0, settings.UnlockGraceSeconds);
-
-            _config.Settings = settings;
-            ConfigStore.Save(_config);
+            var next = ConfigStore.Clone(_config);
+            next.Settings = settings;
+            ConfigStore.Save(next);
+            _config = ConfigStore.Clone(next);
         }
     }
 
@@ -107,6 +126,7 @@ public sealed class ConfigManager
     /// <summary>校验密码，同时维护失败计数。锁定期内一律返回 false。</summary>
     public bool VerifyPassword(string password)
     {
+        if (password == null || password.Length > PasswordHasher.MaxSecretLength) return false;
         lock (_sync)
         {
             if (DateTime.UtcNow < _lockedUntil) return false;
@@ -144,14 +164,17 @@ public sealed class ConfigManager
     {
         lock (_sync)
         {
+            var key = SetPasswordCore(newPassword);
             _tokens.Clear();
-            return SetPasswordCore(newPassword);
+            return key;
         }
     }
 
     /// <summary>用恢复密钥重置密码，成功返回新的恢复密钥，失败返回 null。</summary>
     public string? ResetPassword(string recoveryKey, string newPassword)
     {
+        if (string.IsNullOrWhiteSpace(recoveryKey) || recoveryKey.Length > PasswordHasher.MaxSecretLength
+            || PasswordHasher.NewPasswordError(newPassword) != null) return null;
         lock (_sync)
         {
             // 恢复密钥与密码共用同一套锁定计数，避免绕过限速去猜密钥
@@ -164,50 +187,56 @@ public sealed class ConfigManager
                 return null;
             }
             _failures = 0;
+            var key = SetPasswordCore(newPassword);
             _tokens.Clear();
-            return SetPasswordCore(newPassword);
+            return key;
         }
     }
 
     private string SetPasswordCore(string password)
     {
+        if (PasswordHasher.NewPasswordError(password) is { } error) throw new ArgumentException(error);
         var key = RecoveryKey.Generate();
-        _config.Password = PasswordHasher.Create(password);
-        _config.Recovery = PasswordHasher.Create(RecoveryKey.Normalize(key));
-        ConfigStore.Save(_config);
+        var next = ConfigStore.Clone(_config);
+        next.Password = PasswordHasher.Create(password);
+        next.Recovery = PasswordHasher.Create(RecoveryKey.Normalize(key));
+        ConfigStore.Save(next);
+        _config = next;
         return key;
     }
 
     // ---- 管理登录 token ----
 
-    public string? Login(string password)
+    public string? Login(string password, int clientId)
     {
         lock (_sync)
         {
             if (!VerifyPassword(password)) return null;
 
             PruneTokens();
+            RevokeClientTokens(clientId);
             var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-            _tokens[token] = DateTime.UtcNow + TokenLifetime;
+            _tokens[token] = (DateTime.UtcNow + TokenLifetime, clientId);
             return token;
         }
     }
 
-    public void Logout(string? token)
+    public void Logout(string? token, int clientId)
     {
         if (token == null) return;
-        lock (_sync) _tokens.Remove(token);
+        lock (_sync)
+            if (_tokens.TryGetValue(token, out var login) && login.ClientId == clientId) _tokens.Remove(token);
     }
 
     /// <summary>校验 token 并顺延有效期。</summary>
-    public bool ValidateToken(string? token)
+    public bool ValidateToken(string? token, int clientId)
     {
         if (string.IsNullOrEmpty(token)) return false;
         lock (_sync)
         {
             PruneTokens();
-            if (!_tokens.ContainsKey(token)) return false;
-            _tokens[token] = DateTime.UtcNow + TokenLifetime;
+            if (!_tokens.TryGetValue(token, out var login) || login.ClientId != clientId) return false;
+            _tokens[token] = (DateTime.UtcNow + TokenLifetime, clientId);
             return true;
         }
     }
@@ -215,7 +244,14 @@ public sealed class ConfigManager
     private void PruneTokens()
     {
         var now = DateTime.UtcNow;
-        foreach (var expired in _tokens.Where(kv => kv.Value < now).Select(kv => kv.Key).ToList())
+        foreach (var expired in _tokens.Where(kv => kv.Value.Expires < now).Select(kv => kv.Key).ToList())
             _tokens.Remove(expired);
+    }
+
+    public void RevokeClientTokens(int clientId)
+    {
+        lock (_sync)
+            foreach (var token in _tokens.Where(entry => entry.Value.ClientId == clientId).Select(entry => entry.Key).ToList())
+                _tokens.Remove(token);
     }
 }

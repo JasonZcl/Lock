@@ -9,6 +9,7 @@ namespace Lock.Core.Ipc;
 /// </summary>
 public sealed class JsonLineChannel : IDisposable
 {
+    public const int MaxMessageChars = 1024 * 1024;
     private static readonly JsonSerializerOptions Options = new()
     {
         WriteIndented = false,
@@ -17,13 +18,19 @@ public sealed class JsonLineChannel : IDisposable
     };
 
     private readonly Stream _stream;
+    private readonly bool _leaveOpen;
     private readonly StreamReader _reader;
     private readonly StreamWriter _writer;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly char[] _readBuffer = new char[4096];
+    private int _readOffset;
+    private int _readCount;
+    private int _disposed;
 
-    public JsonLineChannel(Stream stream)
+    public JsonLineChannel(Stream stream, bool leaveOpen = false)
     {
         _stream = stream;
+        _leaveOpen = leaveOpen;
         _reader = new StreamReader(stream, new UTF8Encoding(false), false, 16 * 1024, leaveOpen: true);
         _writer = new StreamWriter(stream, new UTF8Encoding(false), 16 * 1024, leaveOpen: true) { AutoFlush = false, NewLine = "\n" };
     }
@@ -31,19 +38,39 @@ public sealed class JsonLineChannel : IDisposable
     /// <summary>读取下一条消息；连接关闭返回 null。</summary>
     public async Task<JsonObject?> ReadAsync(CancellationToken ct)
     {
+        var line = new StringBuilder();
         while (true)
         {
-            var line = await _reader.ReadLineAsync(ct).ConfigureAwait(false);
-            if (line == null) return null;
-            if (line.Length == 0) continue;
-
-            try
+            if (_readOffset == _readCount)
             {
-                return JsonNode.Parse(line) as JsonObject;
+                _readCount = await _reader.ReadAsync(_readBuffer.AsMemory(), ct).ConfigureAwait(false);
+                _readOffset = 0;
+                if (_readCount == 0)
+                {
+                    if (line.Length != 0) throw new InvalidDataException("消息不完整");
+                    return null;
+                }
             }
-            catch (JsonException)
+            while (_readOffset < _readCount)
             {
-                // 跳过无法解析的行
+                var character = _readBuffer[_readOffset++];
+                if (character == '\n')
+                {
+                    if (line.Length > 0 && line[^1] == '\r') line.Length--;
+                    if (line.Length == 0) throw new InvalidDataException("消息不能为空");
+                    try
+                    {
+                        return JsonNode.Parse(line.ToString(), documentOptions: new JsonDocumentOptions { MaxDepth = 32 }) as JsonObject
+                            ?? throw new InvalidDataException("消息必须是 JSON 对象");
+                    }
+                    catch (JsonException exception)
+                    {
+                        throw new InvalidDataException("消息格式无效", exception);
+                    }
+                }
+                if (line.Length >= MaxMessageChars && !(line.Length == MaxMessageChars && character == '\r'))
+                    throw new InvalidDataException("消息超过大小限制");
+                line.Append(character);
             }
         }
     }
@@ -51,6 +78,7 @@ public sealed class JsonLineChannel : IDisposable
     public async Task SendAsync(JsonObject message, CancellationToken ct = default)
     {
         var line = message.ToJsonString(Options);
+        if (line.Length > MaxMessageChars) throw new InvalidDataException("消息超过大小限制");
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -69,9 +97,13 @@ public sealed class JsonLineChannel : IDisposable
 
     public void Dispose()
     {
-        _writer.Dispose();
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        if (!_leaveOpen)
+        {
+            _stream.Dispose();
+            try { _writer.Dispose(); } catch (IOException) { }
+            catch (ObjectDisposedException) { }
+        }
         _reader.Dispose();
-        _stream.Dispose();
-        _writeLock.Dispose();
     }
 }
